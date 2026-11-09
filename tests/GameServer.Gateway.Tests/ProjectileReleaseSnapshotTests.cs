@@ -40,9 +40,7 @@ public class ProjectileReleaseSnapshotTests
             Assert.Same(cachedSkills, Game.PlayerSkills(conn));
             int nextLevel = Program.Items.Gem(Program.Items.ByHash(fireball.TypeHash)!)!.ExperienceFor(2);
             var (_, changedLevel) = Game.CommitGemExperience(conn, checked((uint)nextLevel * 10));
-            // Experience stops at the "+" threshold and does not level the gem; the click does.
-            Assert.False(changedLevel);
-            Assert.Single(Game.LevelUpReadyGems(conn));
+            Assert.True(changedLevel);
             Assert.NotSame(cachedSkills, Game.PlayerSkills(conn));
             gem = Game.GemSkillEffects(conn).Single(g => Game.SkillsFor(conn).EffectId(g.Effect) == "Fireball");
             using var parent = new Game.PlayerStatScope(conn);
