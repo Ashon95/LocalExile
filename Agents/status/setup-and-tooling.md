@@ -5,6 +5,12 @@ Part of [Status](../Status.md); what to build next in this area is in
 
 ## Works (verified with the real client)
 
+- The C→S length table is generated from the client's own exact writers (`python -I scripts/re/c2s_lengths.py`;
+  `--check` reports a stale file): 285 instance ids, 191 of them with no constant in `KnownClientLength`, so a read
+  no longer loses the messages after one of them.
+  Code: `ClientMessageLengths.cs`, `InstanceProtocol.KnownClientLength`.
+  Docs: [c2s.md](../docs/protocol/c2s.md).
+
 - The 3.29.3c client: login, characters, town, inventory and stash, cosmetics, kills, items, flasks and skills,
   waypoints and transitions, NPCs and shops, the hideout, chat and relog (live run, 2026-11-08).
   Port tools: `scripts/re/port`, `PortMap.java`; docs: [tooling](../docs/re/tooling.md) §11.

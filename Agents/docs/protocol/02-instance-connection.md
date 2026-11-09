@@ -172,6 +172,8 @@ The 0x020a send site is `0x140d3d029..0x140d3d05b`, with vtable `0x14346cd80`.
 The 0x0059 sender is `0x1421669d0`, with vtable `0x1435ca8b0`.
 A five-byte observation of 0x0059 is a partial read, not its complete length.
 `KnownClientLength` now retains each incomplete prefix and consumes exactly one complete message.
+Every id whose client writer is exact frames from the generated table (`ClientMessageLengths`,
+`python -I scripts/re/c2s_lengths.py`), so only an id with no exact writer stops a read.
 It leaves the existing four-byte 0x0099 and chat-channel handling intact.
 
 Tests split these messages at every byte, coalesce them with ticks and wide-string chat, and feed one byte per read.

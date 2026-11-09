@@ -71,7 +71,9 @@ public static class InstanceProtocol
     /// 100–500 ms in state 3 by 0x14214f1d0) and 0x7d area generated (two u32 hashes; 10 in all).</summary>
     public const ushort UseSkillAtLocationId = 0x25, ActionStartedId = 0x1ab;
 
-    /// <summary>Encrypted C→S messages whose length is known (live captures 2026-10-16): 0x1b tick, 0x7d area generated,
+    /// <summary>Encrypted C→S messages whose length is known: the named constants below (live captures and client writers)
+    /// first, then every other id in <see cref="ClientMessageLengths"/>, whose lengths are the client's own exact writers
+    /// (c2s.md) for the ids here with no constant. 0x1b tick, 0x7d area generated,
     /// 0x25 use skill at location (16), 0x015a and 0x01ef (id only). 0x0099 is 4 bytes (class 0x1435cac90, write
     /// 0x141f9bc30: two u8, meaning unknown), sent after entering an area together with the chat channel joins
     /// (<see cref="InstanceChat.JoinChannelId"/>) and 0x0129 (id only); the 20 bytes once taken for 0x0099 were all four.</summary>
@@ -111,7 +113,8 @@ public static class InstanceProtocol
         InstanceCurrencyExchange.RequestOrdersId => InstanceCurrencyExchange.RequestOrdersLength, InstanceCurrencyExchange.PlaceOrderId => InstanceCurrencyExchange.PlaceOrderLength,
         InstanceCurrencyExchange.CloseOrderId => InstanceCurrencyExchange.CloseOrderLength, InstanceCurrencyExchange.ClaimId => InstanceCurrencyExchange.ClaimLength,
         InstanceCurrencyExchange.RequestMarketId => InstanceCurrencyExchange.RequestMarketLength, InstanceCurrencyExchange.RequestPartnersId => InstanceCurrencyExchange.RequestPartnersLength,
-        InstanceCurrencyExchange.RequestFeeId => InstanceCurrencyExchange.RequestFeeLength, _ => null,
+        InstanceCurrencyExchange.RequestFeeId => InstanceCurrencyExchange.RequestFeeLength,
+        _ => ClientMessageLengths.Exact.TryGetValue(id, out int exact) ? exact : null,
     };
 
     /// <summary>
