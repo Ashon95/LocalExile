@@ -5,6 +5,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="GameServer.Gateway.Tests" />
+    <InternalsVisibleTo Include="shrines" />
   </ItemGroup>
 
 </Project>

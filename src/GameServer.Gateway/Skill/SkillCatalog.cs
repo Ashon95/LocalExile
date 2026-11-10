@@ -970,6 +970,43 @@ sealed class SkillCatalog(string folder = "data", bool hardMode = false)
         };
     }
 
+    /// <summary>
+    /// The elemental damage a monster's granted effects give its hit, for <see cref="MonsterModEffects.Hit"/>: its attack
+    /// skill's own physical conversion (<c>MeleeCold</c>: 75% of physical to cold, read from the skill's stat set) and any
+    /// extra element its self-buff grants (<c>AddBuffToTargetSolarisCaster</c>: 50% of physical gained as fire, 5 s, cast
+    /// again whenever it can, so it is up for the fight). Without it the guards' elemental hits were physical and a
+    /// shrine's fire_damage_+% or cold_damage_+% had nothing to raise.
+    /// </summary>
+    public DamageConversion MonsterElemental(int attackEffect, IReadOnlyList<int> grantedEffects, int level)
+    {
+        var conversion = new DamageConversion();
+        AddElemental(conversion, attackEffect, level, skillConversion: true);
+        foreach (int effect in grantedEffects)
+            if (effect != attackEffect) AddElemental(conversion, effect, level, skillConversion: false);
+        return conversion;
+    }
+
+    void AddElemental(DamageConversion conversion, int effect, int level, bool skillConversion)
+    {
+        if (effect < 0) return;
+        var stats = EffectStats(effect, level).ToDictionary(kv => kv.Item1, kv => kv.Item2);
+        foreach (var type in (DamageType[])[DamageType.Fire, DamageType.Cold, DamageType.Lightning, DamageType.Chaos])
+        {
+            string slug = type switch
+            {
+                DamageType.Fire => "fire",
+                DamageType.Cold => "cold",
+                DamageType.Lightning => "lightning",
+                _ => "chaos",
+            };
+            if (skillConversion)
+                conversion.AddSkill(DamageType.Physical, type,
+                    Value(stats, $"skill_physical_damage_%_to_convert_to_{slug}", $"base_physical_damage_%_to_convert_to_{slug}"));
+            else
+                conversion.AddGain(DamageType.Physical, type, Value(stats, $"physical_damage_%_to_add_as_{slug}"));
+        }
+    }
+
     /// <summary>What a monster's summoning skill brings: its stat set's <c>alternate_minion</c> (a SummonedSpecificMonsters
     /// Id, whose MonsterVarietiesKey is the monster), <c>number_of_monsters_to_summon</c>, <c>summon_specific_monsters_in_front_offset</c>
     /// (world units ahead of the summoner) and <c>summoned_monsters_no_drops_or_experience</c>, with the effect's cast time

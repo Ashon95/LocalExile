@@ -186,8 +186,13 @@ static partial class Game
             : KingInMists.IsBoss3(variety) ? KingInMists.Boss3AttackSkill
             : summon is null && !kingActor && effect >= 0 && catalog.ActionHash(effect) is ushort hash ? (ushort)(hash & 0x3fff)
             : SkillCatalog.FirstSkillId;
+        // Its skill's own element: the attack effect's physical conversion (MeleeCold: 75% cold) and a self-buff's extra
+        // fire (the Solaris caster's), so the shrine's fire or cold damage increase has real damage to raise.
+        var baseHit = DamagePacket.Of(DamageType.Physical, baseMin, baseMax);
+        if (effect >= 0 && catalog.MonsterElemental(effect, variety.GrantedEffects ?? [], level) is { IsEmpty: false } elemental)
+            baseHit = baseHit.Convert(elemental);
         var attack = new MonsterAttack(skillId, summon is { CastSeconds: > 0 } ? summon.CastSeconds : mods.Effects.AttackSeconds(swing), reach,
-            mods.Effects.Hit(DamagePacket.Of(DamageType.Physical, baseMin, baseMax)))
+            mods.Effects.Hit(baseHit))
         {
             Spell = spell,
             Scripted = kingActor || brine,
@@ -1568,6 +1573,7 @@ static partial class Game
             double dx = here.X - aim.X, dy = here.Y - aim.Y;
             if (dx * dx + dy * dy > radius * radius) return null;
             outcome = CommitMonsterHitLocked(remote, conn, id, m, a, now, here, aim, checkRange: false, sequence: sequence);
+            if (outcome is not null) BurningGround.Place(conn, m, here, now);
             return outcome?.HitPacket;
         }, $"0x01af monster 0x{id:x} area hit on the player")) return;
         if (outcome is not null) await PresentMonsterHit(remote, stream, ciphers, conn, id, outcome);
@@ -1597,6 +1603,8 @@ static partial class Game
                 return null;
             }
             outcome = CommitMonsterHitLocked(remote, conn, id, m, a, now, conn.Walk.Position(now), m.Walk.Position(now), checkRange: true, sequence: sequence);
+            // The Solaris caster's nova leaves its burning ground where the player stands (BurningGround).
+            if (outcome is not null) BurningGround.Place(conn, m, conn.Walk.Position(now), now);
             return outcome?.HitPacket;
         }, $"0x01af monster 0x{id:x} hit on the player (kind 3, sequence 0x{sequence:x4})")) return;
         if (outcome is not null) await PresentMonsterHit(remote, stream, ciphers, conn, id, outcome);

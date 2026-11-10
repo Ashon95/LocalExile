@@ -20,6 +20,7 @@ public sealed class GameModule : IModule
         module.OnPlayerLeaving((player, _) => global::DoedreSewers.Leaving(Program.ConnOf(player)));
         module.OnTick((player, _) => global::BrineKing.Tick(Program.ConnOf(player)));
         module.OnTick((player, _) => global::VaalOversoul.Tick(Program.ConnOf(player)));
+        module.OnTick((player, _) => global::BurningGround.Tick(Program.ConnOf(player)));
         module.OnTick((player, _) => global::DepravedTrinity.Tick(Program.ConnOf(player)));
         module.Lifetime.Own(global::DepravedTrinity.CleanupOnUnload());
         module.Lifetime.Own(GameEvents.ObjectUse.Add("Game", global::DepravedTrinity.Use));

@@ -175,8 +175,12 @@ static partial class Game
     {
         var gem = SupportedSkill(conn, skillId);
         if (!SkillsFor(conn).IsAttack(gem.Effect)) return 0;
-        return Math.Clamp(Stats.Key("base_melee_attack_repeat_count") is uint key
-            ? gem.Stats.GetValueOrDefault(key) : 0, 0, 3);
+        // The Echoing Shrine's skill_repeat_count repeats attacks as well as spells ("Skills Repeat an additional
+        // Time"); the character's own sum holds it, while Multistrike's count is the gem's.
+        int gemRepeats = Stats.Key("base_melee_attack_repeat_count") is uint key ? gem.Stats.GetValueOrDefault(key) : 0;
+        int shrineRepeats = Stats.Key("skill_repeat_count") is uint repeat
+            ? CharacterPlayerStats(conn).GetValueOrDefault(repeat) : 0;
+        return Math.Clamp(gemRepeats + shrineRepeats, 0, 3);
     }
 
     internal static double MeleeRepeatDamageMore(ClientState conn, ushort skillId, int repeat)

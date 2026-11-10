@@ -76,7 +76,7 @@ sealed class MonsterModEffects(IReadOnlyDictionary<string, int> stats)
     public int MaxLife(int baseLife) => Math.Max(1, (int)Math.Floor(baseLife * (1 + this["maximum_life_+%"] / 100.0)
         * (1 + this["monster_life_+%_final_from_rarity"] / 100.0) * (1 + this[MonsterModCatalog.RarityTableLifeStat] / 100.0)));
 
-    /// <summary>The monster's hit before the player's defences: the base physical damage raised by damage_+% and
+    /// <summary>The monster's hit before the player's defences: the base damage raised by damage_+% and
     /// physical_damage_+% (increased, the gains inherit them), by the rarity's monster_rarity_damage_+%_final (more)
     /// and lowered by monster_rarity_attack_cast_speed_+%_and_damage_-%_final (less), rounded and at least 1 as the
     /// rarity's hit always was (Hillock at level 1: 6.6–12.3 → 7–12); then the "gain as extra" stats add their types
@@ -90,16 +90,46 @@ sealed class MonsterModEffects(IReadOnlyDictionary<string, int> stats)
             .AddGain(DamageType.Physical, DamageType.Fire, this["physical_damage_%_to_add_as_fire"])
             .AddGain(DamageType.Physical, DamageType.Cold, this["physical_damage_%_to_add_as_cold"])
             .AddGain(DamageType.Physical, DamageType.Lightning, this["physical_damage_%_to_add_as_lightning"]);
-        var physicalRange = physical[DamageType.Physical];
-        var hit = DamagePacket.Of(DamageType.Physical, Math.Max(1, Math.Round(physicalRange.Min * factor)),
-            Math.Max(1, Math.Round(physicalRange.Max * factor))).Convert(gains).Round();
+        // The physical part takes damage_+% and physical_damage_+% here; a type the skill already converted (MeleeCold's
+        // 75% cold, the Solaris caster's fire) keeps its share and takes its own increases below.
+        var hit = physical.Select((type, range) => type == DamageType.Physical
+                ? new GameServer.Core.World.DamageRange(Math.Max(1, Math.Round(range.Min * factor)),
+                    Math.Max(1, Math.Round(range.Max * factor)))
+                : range)
+            .Convert(gains).Round();
         int chaos = this["non_chaos_damage_to_add_as_chaos_damage_%"];
-        if (chaos <= 0) return hit;
-        double minChaos = 0, maxChaos = 0;
-        foreach (var (type, range) in hit.Components)
-            if (type != DamageType.Chaos) { minChaos += range.Min * chaos / 100.0; maxChaos += range.Max * chaos / 100.0; }
-        return hit.Add(DamageType.Chaos, new GameServer.Core.World.DamageRange(minChaos, maxChaos).Round());
+        if (chaos > 0)
+        {
+            double minChaos = 0, maxChaos = 0;
+            foreach (var (type, range) in hit.Components)
+                if (type != DamageType.Chaos) { minChaos += range.Min * chaos / 100.0; maxChaos += range.Max * chaos / 100.0; }
+            hit = hit.Add(DamageType.Chaos, new GameServer.Core.World.DamageRange(minChaos, maxChaos).Round());
+        }
+        return Increased(hit);
     }
+
+    /// <summary>Its elemental and chaos damage increased as their own modifiers say (the physical part took damage_+% and
+    /// physical_damage_+% at its base): fire_damage_+%, cold_damage_+%, lightning_damage_+% and elemental_damage_+% for the
+    /// elements, chaos_damage_+%. A monster's fire/cold/lightning damage is a gain, and this is what a shrine's</summary>
+    public DamagePacket Increased(DamagePacket hit) =>
+        ScaleTypes(hit, name => this[name], physicalAlreadyIncreased: true);
+
+    // Each damage type scaled by its own increased modifiers: damage_+% for every type, then the type's own.
+    static DamagePacket ScaleTypes(DamagePacket hit, Func<string, int> get, bool physicalAlreadyIncreased = false) =>
+        hit.Select((type, range) =>
+        {
+            if (physicalAlreadyIncreased && type == DamageType.Physical) return range;
+            int pct = type switch
+            {
+                DamageType.Physical => get("damage_+%") + get("physical_damage_+%"),
+                DamageType.Fire => get("damage_+%") + get("elemental_damage_+%") + get("fire_damage_+%"),
+                DamageType.Cold => get("damage_+%") + get("elemental_damage_+%") + get("cold_damage_+%"),
+                DamageType.Lightning => get("damage_+%") + get("elemental_damage_+%") + get("lightning_damage_+%"),
+                DamageType.Chaos => get("damage_+%") + get("chaos_damage_+%"),
+                _ => get("damage_+%"),
+            };
+            return pct == 0 ? range : range.Scale(1 + pct / 100.0);
+        });
 
     /// <summary>A hit with the "gain as extra" stats of <paramref name="extra"/> added and its damage_+% (an encounter's
     /// buffs, given after the monster's own hit was fixed at its spawn: <see cref="Hit"/>; the increase is applied on the
@@ -109,10 +139,10 @@ sealed class MonsterModEffects(IReadOnlyDictionary<string, int> stats)
         var gains = new DamageConversion()
             .AddGain(DamageType.Physical, DamageType.Fire, extra.GetValueOrDefault("physical_damage_%_to_add_as_fire"))
             .AddGain(DamageType.Physical, DamageType.Cold, extra.GetValueOrDefault("physical_damage_%_to_add_as_cold"))
-            .AddGain(DamageType.Physical, DamageType.Lightning, extra.GetValueOrDefault("physical_damage_%_to_add_as_lightning"));
+            .AddGain(DamageType.Physical, DamageType.Lightning, extra.GetValueOrDefault("physical_damage_%_to_add_as_lightning"))
+            .AddGain(DamageType.Physical, DamageType.Chaos, extra.GetValueOrDefault("physical_damage_%_to_add_as_chaos"));
         var added = hit.Convert(gains);
-        if (extra.GetValueOrDefault("damage_+%") is int increased and not 0) added = added.Scale(Math.Max(0, 1 + increased / 100.0));
-        return added.Round();
+        return ScaleTypes(added, name => extra.GetValueOrDefault(name)).Round();
     }
 
     /// <summary>The attack time: the base over (1 + attack_speed_+%) and the rarity's more speed

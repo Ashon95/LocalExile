@@ -83,6 +83,19 @@ Part of [Status](../Status.md); what to build next in this area is in
   Code: `InstancePause.cs`, Gateway (`SetPaused`).
   Docs: [22](../docs/protocol/22-pause.md).
 
+- Map shrines: the level generator's Shrine lines spawn the 15 basic types, each with its Shrines row's own icon and buff
+  (45 s; Divine 20 s), and a click in walk-up range grants that row's BuffTemplates stats; `/shrines [Id …]` places the basic
+  types around the player for checking one area.
+  The Lightning shrine's effect casts its <code>ShrineShockNova</code> (GrantedEffects 1067, the shrine's
+  <code>ShrineDaemonLightning</code>) around the player once a second, drawn with the client's own Shock Nova art scaled to
+  the 24-cell radius it hits in (the generic 12 doubled by the skill's +100% final). Every hostile monster in that radius
+  takes the daemon's level hit as lightning damage and a 15% shock; the player who used the shrine is never damaged by it.
+  Each cast leaves five four-second shocked-ground patches (BuffDefinitions 232) on a ring around the caster, so a monster
+  standing in one is kept under that shock. A used shrine's object is removed (0x02bd) just after the click: the records
+  carry no "used" statue state for the standard rows, so it is consumed rather than left standing inactive.
+  Not yet: the other types' active effects (Freezing and Burning shrines' novae, Skeletal summons, Smoke's cloud),
+  Shock Nova's inner-ring-plus-nova double hit and its cast animation.
+  Code: `Modules/Core/World/Shrines` (`ShrinesModule.cs`, `ShrineNova.cs`), `ShrineCatalog.cs`, `ShrinePlacement.cs`.
 - Instance framing retains split 0x020a and 0x0059 messages at their primary-writer lengths of 3 and 16 bytes.
   Every-split and coalesced tick/chat regressions pass; integrated native transfers preserve subsequent commands.
   Unknown message layouts and existing 0x0099 handling remain unchanged.

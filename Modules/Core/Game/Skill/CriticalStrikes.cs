@@ -70,7 +70,6 @@ static partial class Game
     internal static bool RollCriticalStrike(ClientState conn, int chance, IReadOnlyDictionary<uint, int>? own = null,
         bool attack = true, SkillCriticalRoll? skillRoll = null, IReadOnlyDictionary<uint, int>? player = null)
     {
-        if (chance <= 0 && !HoldingFishingRod(conn)) return false;
         lock (conn.Monsters)
         {
             player ??= CharacterPlayerStats(conn);
@@ -100,12 +99,13 @@ static partial class Game
     // virtual_always_crit calculator (0x1427625b0) reads the stat only for main_hand_weapon_type 15; PoB: CritChance
     // OVERRIDE 100.
     static bool AlwaysCritical(ClientState conn, Func<string, int> get) =>
-        get("always_crit_while_holding_fishing_rod") != 0 && HoldingFishingRod(conn);
+        get("always_crit") != 0
+        || get("always_crit_while_holding_fishing_rod") != 0 && HoldingFishingRod(conn);
 
     // The chance the panel shows under it: 100% where the hit could crit at all; a 0% base still shows 0 although its
     // hits crit (wiki Baited Breath). Prohibited chances are already 0.
     static int DisplayedCriticalChance(ClientState conn, int chance, Func<string, int> get) =>
-        chance > 0 && AlwaysCritical(conn, get) ? 10_000 : chance;
+        (chance > 0 || get("always_crit") != 0) && AlwaysCritical(conn, get) ? 10_000 : chance;
 
     internal static int AttackCriticalMultiplier(ClientState conn, IReadOnlyDictionary<uint, int> player,
         int effect = -1, IReadOnlyDictionary<uint, int>? own = null) =>
