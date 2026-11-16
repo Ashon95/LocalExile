@@ -197,12 +197,15 @@ public static partial class Game
     public static double SupportedAttackSeconds(ClientState conn, ushort skillId) => SupportedAttackSecondsFor(conn, skillId, null);
 
     // Multistrike: "Supported Skills Repeat an additional X times" (base_melee_attack_repeat_count). The repeats are
-    // hits of the same use, so the skill's attack time is split between them and the support's per-repeat more damage
-    // applies to each one after the first.
+    // swings of one paid use, one full attack time apart. Each repeat's more damage is relative to the initial hit.
     public static int MeleeAttackRepeats(ClientState conn, ushort skillId)
     {
         var gem = SupportedSkill(conn, skillId);
-        if (!SkillsFor(conn).IsAttack(gem.Effect)) return 0;
+        var player = CharacterPlayerStats(conn);
+        int Stat(string name) => Stats.Key(name) is uint key ? gem.Stats.GetValueOrDefault(key) + player.GetValueOrDefault(key) : 0;
+        if (!SkillsFor(conn).IsAttack(gem.Effect) || !SkillsFor(conn).IsMelee(gem.Effect)
+            || SkillsFor(conn).IsChannelled(gem.Effect)
+            || Stat("disable_attack_repeats") != 0 || Stat("disable_skill_repeats") != 0) return 0;
         return Math.Clamp(Stats.Key("base_melee_attack_repeat_count") is uint key
             ? gem.Stats.GetValueOrDefault(key) : 0, 0, 3);
     }
@@ -345,11 +348,21 @@ public static partial class Game
         more *= CombatRushMore(conn, skillId, gem, conn.Clock.Elapsed.TotalSeconds);
         // Supports.AttackSpeedMultiplier reads the skill's own GEPL row too: its inherent -20 on Tornado Shot is
         // already part of this factor. Do not apply the same GEPL value again.
+        int additional = SkillAttackTiming.AdditionalMilliseconds(stats);
+        if (additional != 0)
+        {
+            var weapon = offHand ?? WeaponFor(conn);
+            // ItemWeaponStats already includes each hand's local speed in AttackMs. The character bucket is shared
+            // (Progression's attackSpeedMore), so neither hand strips a local multiplier from it here.
+            int speed = weapon.IncreasedAttackSpeed(stats);
+            return (SkillAttackTiming.Seconds(weapon.AttackMs, speed, more, additional,
+                proxy ? 1 : PlayerActionFactor(conn), clampToTick), speed);
+        }
         int baseSpeed = offHand is null ? WeaponFor(conn).IncreasedAttackSpeed(stats)
             : SkillCatalog.Unarmed.OffHandAttackSpeedPct(stats.GetValueOrDefault(StatKeys.MainHandAttackSpeedPct),
                 WeaponProfileFor(conn, activeSet: true).LocalAttackSpeedPct);
         double seconds = offHand is null ? WeaponFor(conn).AttackSeconds(stats) : DualWieldPanel.OffHandSeconds(offHand, baseSpeed);
-        // Preserve the weapon timing's existing minimum, but compose MORE through the native integer final percent.
+        // Preserve the zero-additional-time path's existing minimum and integer final-speed rounding.
         double paced = seconds * Math.Max(.01, 1 + baseSpeed / 100.0)
             / (1 + SkillAttackTiming.FinalSpeedPercent(baseSpeed, more) / 100.0) / (proxy ? 1 : PlayerActionFactor(conn));
         return (clampToTick ? Math.Max(TickSeconds, paced) : Math.Max(.001, paced), baseSpeed);
