@@ -5,6 +5,7 @@ Part of [Status](../Status.md); what to build next in this area is in
 
 ## Works (verified with the real client)
 
+- Ordinary melee with resolved clip metadata follows native timing ([11](../docs/protocol/11-skills.md) §6).
 - Monsters belong to the area instance: re-entering it finds the living ones where they were, with their damage, and
   the dead stay dead; a new instance gets fresh packs.
   Code: `InstanceStore.cs`, `PopulateArea`, Gateway.
@@ -160,6 +161,9 @@ Part of [Status](../Status.md); what to build next in this area is in
   Docs: [11](../docs/protocol/11-skills.md) §6.
 
 ## Partly working
+
+- Native variety weapons reach ordinary monster inventories; explicit equipment overrides remain authoritative.
+  Native appearance references resolve; rendered model parity remains unverified.
 
 - Native ranged actions receive final projectile counts; other than simulated mortars, flight damage remains incomplete.
 - Normal Sirus: entry, four phases and rewards; AI/drop tuning provisional ([14](../docs/protocol/14-monster-packs.md)).

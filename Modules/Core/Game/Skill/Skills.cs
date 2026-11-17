@@ -41,6 +41,7 @@ public static partial class Game
             var player = FinalPlayerStatsFrom(conn, new(character)).ToList();
             var skills = new List<GrantedSkill>([.. PlayerDefaultSkills(conn, player, character),
                 .. GemSkills(conn, player, character, panelSources!), .. GameEvents.ExtraSkills(conn)]);
+            skills.AddRange(SentinelSourceSkills(conn, skills).ToArray());
             conn.PlayerSkillsCache = skills;
             conn.PlayerSkillsAt = now;
             PlayerSkillsInputs.AddOrUpdate(conn, new(inputs, skills));
@@ -690,7 +691,6 @@ public static partial class Game
             // A trap or herald that deals secondary damage (Bear Trap carries the Spell type but no spell base damage,
             // Herald of Ice's shatter): its own secondary rows, before the attack/spell hit rows.
             if (!SkillsFor(conn).IsAttack(effect) && Get("display_skill_deals_secondary_damage") != 0
-                && !SkillHitPlan.ForSkill(SkillsFor(conn), effect, supported.Level, supported.Quality).CanHit
                 && SkillsFor(conn).SecondaryHitDamage(effect, supported.Level, supported.Quality) is { IsZero: false } secondaryBase)
             {
                 foreach (var (stat, value) in SecondaryPanelRows(conn, Get, playerStats, supported, secondaryBase))
@@ -835,6 +835,25 @@ public static partial class Game
                     Get("bladefall_volley_frequency_+%_per_100_maximum_mana"), conn.Pools.Mana));
             if (SummonData.Find(SkillsFor(conn).EffectId(effect)) is { LimitStat.Length: > 0 } summon)
                 Publish(summon.LimitStat.Replace("base_", "", StringComparison.Ordinal), SummonLimit(conn, summon, supported));
+            if (SkillsFor(conn).EffectId(effect) is "DominatingBlow" or "DominatingBlowAltX")
+                foreach (var rarity in new[] { MonsterRarity.Normal, MonsterRarity.Magic, MonsterRarity.Rare })
+                    if (HitSummonDefinition(SkillsFor(conn).EffectId(effect), rarity) is { } sentinel)
+                        Publish(sentinel.LimitStat.Replace("base_", "", StringComparison.Ordinal), SummonLimit(conn, sentinel, supported));
+            if (SkillsFor(conn).EffectId(effect) is "Absolution" or "AbsolutionAltX" or "VaalAbsolution"
+                or "DominatingBlow" or "DominatingBlowAltX" or "VaalDomination")
+            {
+                Publish("skill_behaviour_variation", SkillsFor(conn).BehaviourVariation(effect));
+                bool absolution = SkillsFor(conn).EffectId(effect)!.Contains("Absolution", StringComparison.Ordinal);
+                string family = absolution ? "absolution_sentinels" : "dominated_monsters";
+                string display = absolution ? "display_max_upgraded_sentinels_of_absolution" : "display_max_upgraded_sentinels_of_dominance";
+                int basis = GolemStat(own, "base_max_number_of_vaal_" + family);
+                if (basis == 0) basis = GolemStat(own, display);
+                Publish("max_number_of_vaal_" + family, Math.Clamp(basis
+                    + GolemStat(playerStats, "base_max_number_of_vaal_" + family)
+                    + GolemStat(playerStats, "max_number_of_vaal_" + family), 0, 200));
+                foreach (string count in new[] { "number_of_active_absolution_sentinels", "number_of_active_vaal_absolution_sentinels",
+                    "number_of_dominated_monsters", "number_of_dominated_vaal_monsters" }) Publish(count, GolemStat(playerStats, count));
+            }
             if (GolemData.Find(SkillsFor(conn).EffectId(effect)) is { IsGolem: true })
                 Publish("number_of_golems_allowed", GolemCatalog.Limit(OwnPanel("base_number_of_golems_allowed"),
                     n => GolemStat(playerStats, n)));
@@ -1034,6 +1053,7 @@ public static partial class Game
 
     public static string? ActorSkillDisabledCore(ClientState conn, int effect, ushort? skillId)
     {
+        if (VaalMinionProxyDisabled(conn, effect, skillId) is { } proxy) return proxy;
         if (OwnAuraSkillRestricted(conn, effect, skillId)) return "own aura skills are disabled";
         // Devout of Gruthkul: every spell, auras and triggered spells too (wiki: they cannot be cast or triggered).
         if (CastingSpell(conn, effect) && SpellsDisabled(conn)) return "spells are disabled";

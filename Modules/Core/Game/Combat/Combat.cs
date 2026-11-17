@@ -518,7 +518,7 @@ public static partial class Game
                 var gambler = GamblerFor(player);
                 var ownRolled = GameEvents.WithOutgoingDamage(conn, player, m, (gambler with { DamageMorePct = 0 }).RollOutgoingHit(hit, Random.Shared));
                 critical = RollCriticalStrike(conn, CriticalChanceOn(conn, targetId, conn.Pools.AttackCriticalStrikeChance,
-                        AttackCriticalChanceVsBlinded(conn, player), AttackCriticalChanceVsProfane(conn, player)), ownPenetration, skillRoll: criticalRoll)
+                        AttackCriticalChanceVsBlinded(conn, player), AttackCriticalChanceVsGround(conn, player)), ownPenetration, skillRoll: criticalRoll)
                     && GameServer.Core.World.EvasionEntropy.ConfirmsCritical(hitChance, conn.AttackAccuracyRandom);
                 int sourceCriticalMultiplier = AttackCriticalMultiplier(conn, player);
                 int criticalMultiplier = CriticalMultiplierOn(m, sourceCriticalMultiplier);
@@ -609,6 +609,7 @@ public static partial class Game
         var gem = GemSkillEffects(conn).FirstOrDefault(g => g.Id == use.SkillId);
         if (gem.Name is not null && GemSkillInstanceDisabled(conn, gem.Effect, use.SkillId) is not null) return;
         if (gem.Name is not null && !ProjectilePathAvailable(remote, conn, use.SkillId, gem.Effect)) return;
+        if (gem.Name is not null && !VaalMinionTargetAvailable(conn, use.SkillId, use.TargetId)) return;
         // A movement attack (Flicker Strike, Leap Slam) closes the distance itself, and an attack used with "always attack
         // without moving" (Flags bit 0) swings from where the player stands: both keep the immediate cast.
         if (gem.Name is not null && !IsTotemSkill(conn, use.SkillId) && SkillsFor(conn).IsAttack(gem.Effect) && !SkillsFor(conn).IsMovement(gem.Effect) && (use.Flags & 0x1) == 0)
@@ -994,9 +995,12 @@ public static partial class Game
                 () => !conn.Closed && PlayerActionCurrent(conn, action) && Current()) is { } taken) return taken;
         if (gem.Name is not null && CurseCatalog.All.ContainsKey(SkillsFor(conn).EffectId(gem.Effect) ?? ""))
             return await CastCurse(remote, stream, ciphers, conn, skillId, to, targetId, recoveryGeneration, Current);
+        if (gem.Name is not null && IsVaalMinion(SkillsFor(conn).EffectId(gem.Effect)))
+            return await RepeatSummonCast(conn, skillId, recoveryGeneration, Current, false,
+                () => ReleaseVaalMinions(remote, stream, ciphers, conn, skillId, to, Current, targetId));
         if (gem.Name is not null && MinionUtility(SkillsFor(conn).EffectId(gem.Effect)))
             return await CastMinionUtility(conn, skillId, to, targetId, recoveryGeneration, Current);
-        if (gem.Name is not null && GolemData.Find(SkillsFor(conn).EffectId(gem.Effect)) is { } golem)
+        if (gem.Name is not null && !IsTotemSkill(conn, skillId) && GolemData.Find(SkillsFor(conn).EffectId(gem.Effect)) is { } golem)
             return await CastGolem(remote, stream, ciphers, conn, skillId, golem, to, recoveryGeneration, Current);
         if (gem.Name is not null && !IsTotemSkill(conn, skillId) && SkillsFor(conn).EffectId(gem.Effect) == "LightningWarp")
             return ScheduleLightningWarp(remote, stream, ciphers, conn, gem, to, Current, criticalRoll);
@@ -1982,7 +1986,7 @@ public static partial class Game
                 // The shared roll meets each target's current chance: a source can change between targets.
                 int criticalChance = CriticalChanceOn(conn, id, SupportedCriticalChance(conn, skillId),
                     SupportedCriticalChanceVsBlinded(conn, skillId, release: false),
-                    SupportedCriticalChanceVsProfane(conn, skillId, release: false));
+                    SupportedCriticalChanceVsGround(conn, skillId, release: false));
                 critical = RollCriticalStrike(conn, criticalChance, skillStats,
                         attack: !spell, skillRoll: criticalRoll, player: player)
                     && (spell || GameServer.Core.World.EvasionEntropy.ConfirmsCritical(hitChance, conn.AttackAccuracyRandom));
@@ -2718,6 +2722,7 @@ public static partial class Game
             if (OnslaughtOnKill(conn)) await SendKillOnslaught(remote, stream, ciphers, conn);
             ChargesOnKill(conn, m);
             RecoverOnKill(conn, m);
+            GainPhasingOnKill(conn);
             // "Killed an enemy recently" (issue #504). The variant stats (a cursed enemy, a shattered one, a frozen one)
             // need a fact about the victim the server does not track yet, so only the plain event is recorded and those
             // ids stay NotModelled rather than being answered wrongly.

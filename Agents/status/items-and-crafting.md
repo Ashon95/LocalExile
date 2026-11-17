@@ -34,6 +34,9 @@ Part of [Status](../Status.md); what to build next in this area is in
 
 ## Partly working
 
+- Unique-flask mechanics; Oriath explosion parity, Sap, Brittle and Replica Rumi's Petrified remain open.
+  Docs: [13](../docs/protocol/13-items.md) §8a.
+
 - NPC divination card exchange supports all 456 active 3.29.3d card definitions and keeps the 14 client-disabled
   cards, including all Grand Spectrum bases and corruption implicits; local weights are not official probabilities.
   Docs: [17](../docs/protocol/17-npcs.md).
@@ -52,6 +55,7 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Sacred Orb rerolls: fresh checks of the merged branch, and Ward's character calculations.
   Docs: [13](../docs/protocol/13-items.md), "Sacred Orb".
 - Special defence rules and local requirement percentages. Docs: [13](../docs/protocol/13-items.md) §2-§2d.
+- Yriel and Beacon creation variants use world-data modifier bundles; their gameplay remains partial.
 - Unique items, Mageblood, Headhunter, Bino's Kitchen Knife, The Squire and abyss jewels; most uniques' own mechanics
   are missing.
   Bino's spreads the strongest poison and regenerates nearby players and allied monsters; fresh client checks are pending.

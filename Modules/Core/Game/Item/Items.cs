@@ -354,14 +354,22 @@ public static partial class Game
     public static Item AdornedJewel(Item item, int percent)
     {
         if (percent == 0 || item.Rarity != ItemRarity.Magic || !item.Corrupted) return item;
-        return item with
+        // One scaled copy per jewel and percentage: the stat sources' cache compares worn items by reference (and then
+        // their mod lists), so a new copy at every build missed it each time.
+        if (AdornedJewels.TryGetValue(item, out var kept) && kept.Percent == percent) return kept.Item;
+        var scaled = item with
         {
             Mods = [.. item.Mods.Select(mod => mod with
             {
                 Values = [.. mod.Values.Select(value => (int)Math.Floor(value * (100 + percent) / 100.0))],
             })],
         };
+        AdornedJewels.AddOrUpdate(item, new(percent, scaled));
+        return scaled;
     }
+
+    sealed record ScaledJewel(int Percent, Item Item);
+    static readonly RuleTable<Item, ScaledJewel> AdornedJewels = new();
 
     /// <summary>Why a held item cannot go into PassiveJewels1 at (x, y), or null: the slot must be an ordinary large
     /// jewel socket whose passive node is allocated, or a cluster jewel's expansion socket whose jewel is socketed,
@@ -682,7 +690,8 @@ public static partial class Game
                 name => Get(name) + (name == "flask_life_to_recover_+%" ? Lifetap.FlaskRecovery(conn) : 0), conn.PlayerLife, conn.PlayerMaxLife, playerLevel);
             copyLife = ManaFlaskCopiesLife(r, character);
             canRecover = Flasks.CanRecover(use, conn.PlayerLife, conn.PlayerUnreservedLife, conn.PlayerMana, (uint)UnreservedMana(conn))
-                || copyLife && conn.PlayerLife < conn.PlayerUnreservedLife;
+                || copyLife && conn.PlayerLife < conn.PlayerUnreservedLife
+                || ConditionalFlaskAilmentProtectionTriggered(conn, local, AreaTime(conn));
         }
         bool CurrentRecovery()
         {
@@ -709,8 +718,11 @@ public static partial class Game
             return;
         }
         if (!CurrentRecovery()) return;
+        // The flask's "during effect" mods (Divination Distillate), scaled by its increased effect.
+        var during = UtilityFlasks.DuringEffectSources(local,
+            FlaskEffectScaling.Multiplier(Get, playerLevel, local.GetValueOrDefault("local_flask_effect_+%")));
         await SpendFlask(remote, stream, ciphers, conn, flask, charges, slot, CurrentRecovery,
-            spent => AcceptRecoveryFlaskLocked(remote, conn, slot, spent, type, use, r, copyLife));
+            spent => AcceptRecoveryFlaskLocked(remote, conn, slot, spent, type, use, r, copyLife, local, during));
     }
 
     // Gives each life, mana and utility flask in the flask bar up to `charges` charges (int.MaxValue: full) and saves them (or, for

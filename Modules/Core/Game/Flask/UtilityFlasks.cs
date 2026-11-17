@@ -58,6 +58,7 @@ public static partial class Game
             if (conn.UtilityFlaskEffects.Of(flask.Id) is { } previous)
                 QueueUtilityFlaskEnd(state, previous, "refreshed");
             UtilityFlasks.Start(conn, effect, () => RecomputePoolsAndSpeed(conn));
+            ApplyConditionalFlaskAilmentProtectionLocked(conn, local, now);
             if (UtilityFlasks.RestoreWardAfterPaidUse(conn.Ward, name => local.GetValueOrDefault(name), now))
                 Console.WriteLine($"[gateway] Ward restored on paid {type.Name}: {conn.Ward.Current}/{conn.Ward.Maximum}");
             Console.WriteLine($"[gateway] {remote} <= 0x0070 use flask {slot} ({type.Name}): {utility.BuffId} for {seconds:0.##} s: " +
@@ -65,6 +66,10 @@ public static partial class Game
             state.Packets.Add(new([], $"0x01c1 player buff: {type.Name} (flask {slot}), {seconds:0.##} s",
                 UtilityStart: effect));
             FlaskToLinkedTargetsLocked(conn, flask.Item, local, utility, Get);
+            // "Gain X Endurance/Frenzy/Power Charge(s) on use" (Replica Rumi's Concoction).
+            foreach (var (stat, charge) in ChargesOnFlaskUse)
+                if (local.GetValueOrDefault(stat) is int count and > 0)
+                    ChargesOf(conn).Enqueue(new ChargeEvent.Grant(charge, count, $"{type.Name} on use"));
             MakeFlaskGroundsLocked(conn, local, seconds, now, character);
             state.StatRevision++;
             state.Enqueue(new(FlaskEnchantments.Trigger.Adjacent, flask.Id, (byte)slot), signal?.Chain);
@@ -73,6 +78,13 @@ public static partial class Game
         if (CurrentGameWork && !conn.Closed && !conn.LeavingArea) await EnemyDebuffsTick(remote, stream, ciphers, conn, AreaTime(conn));
         return true;
     }
+
+    static readonly (string Stat, ChargeType Charge)[] ChargesOnFlaskUse =
+    [
+        ("local_flask_gain_endurance_charges_on_use", ChargeType.Endurance),
+        ("local_flask_gain_frenzy_charges_on_use", ChargeType.Frenzy),
+        ("local_flask_gain_power_charges_on_use", ChargeType.Power),
+    ];
 
     // The player's increased rarity of items found (Gold Flask, gear, passives) that the drops of a kill use
     // (ItemDrops.WithIncreasedRarity). A kill made with a supported skill adds that skill's own

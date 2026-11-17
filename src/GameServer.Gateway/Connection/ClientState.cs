@@ -290,6 +290,9 @@ public sealed class SpawnedMonster(string label, PlayerWalk walk, int aggroRange
     public int ActionGeneration;
     public int? SwingGeneration;
     public double SwingOrderedAt;
+    // A known ordinary melee clip's contact and recovery, measured before action speed. The generation prevents
+    // a later ailment update from retiming a canceled swing or a different action's busy period.
+    public (int Generation, ActionTimeClock Clock, double Contact, double Duration, double Tail)? MeleeClock;
     // The last melee order, or admitted lockstep AI Move/swing: one rising counter for the actor's orders.
     // The client picks a melee swing's clip by its action sequence.
     public ushort Sequence = 0x8000;
@@ -544,6 +547,10 @@ public sealed partial class ClientState(AreaLayout layout, uint ticket, uint see
     // The other "recently" events (issue #504): what happened in the last four seconds, for the stats that ask.
     public readonly RecentEvents RecentEvents = new();
     public readonly PlayerElementalAilments ElementalAilments = new();
+    public readonly IncomingDamagingAilments IncomingAilments = new();
+    public IncomingDamagingAilments.State? PresentedIncomingAilments;
+    public int PresentedIncomingAilmentEpoch = -1;
+    public double ChaosDotBypassCarry;
     // The King in the Mists' Portent Vapors: stacks taken from his Mystic Fetishes and when they expire. The server
     // applies the increased damage taken to his hits; the buff icon and count are presentation.
     public int KingPortentStacks;
@@ -570,7 +577,7 @@ public sealed partial class ClientState(AreaLayout layout, uint ticket, uint see
     public void InvalidateIncomingHits(bool clear = true)
     {
         if (PlayerLife == 0 || Closed)
-        { PaidChannel = null; NonChaosDotBypassCarry = NonChaosDotTakenCarry = 0; }
+        { PaidChannel = null; NonChaosDotBypassCarry = NonChaosDotTakenCarry = ChaosDotBypassCarry = 0; }
         lock (Monsters)
         {
             IncomingHitEpoch++;
@@ -581,7 +588,12 @@ public sealed partial class ClientState(AreaLayout layout, uint ticket, uint see
                 monster.ActionGeneration++;
                 monster.SwingGeneration = null;
             }
-            if (clear) { RecentEnemyHits.Clear(); RecentEvents.Clear(); ElementalAilments.Clear(); }
+            if (clear)
+            {
+                RecentEnemyHits.Clear(); RecentEvents.Clear(); ElementalAilments.Clear();
+                IncomingAilments.Clear(); PresentedIncomingAilments = null;
+                PresentedIncomingAilmentEpoch = IncomingHitEpoch;
+            }
         }
     }
     public int ProjectileEpoch;
@@ -918,6 +930,10 @@ public sealed partial class ClientState(AreaLayout layout, uint ticket, uint see
     public Flasks.Effects FlaskEffects { get; } = new();
     /// <summary>The utility flasks whose effect runs (UtilityFlasks); their stats count in the pools until they end.</summary>
     public UtilityFlasks.Effects UtilityFlaskEffects { get; } = new();
+    /// <summary>Life, mana and hybrid flasks' "during effect" mods while their recovery runs.</summary>
+    public UtilityFlasks.RecoveryDuringEffects RecoveryFlaskStats { get; } = new();
+    /// <summary>Ignited corpses consumed since the flask-charge loop last paid them (Cinderswallow Urn's recharge).</summary>
+    public int IgnitedCorpsesConsumed;
     /// <summary>What Headhunter took from slain rares (StolenMods).</summary>
     public StolenMods StolenMods { get; } = new();
     /// <summary>The Headhunter buff on the client, 0 for none (Monsters lock).</summary>
