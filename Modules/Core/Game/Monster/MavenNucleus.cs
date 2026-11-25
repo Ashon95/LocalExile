@@ -59,7 +59,11 @@ public static partial class Game
             int? fallback = null;
             foreach (int effect in effects)
             {
-                if (skills.IsMovement(effect) || skills.CastsOnDeath(effect)) continue;
+                // A corpse skill does nothing without a corpse (MonsterSkills.OnCorpse): it is never the plain attack.
+                // Nor is a trigger on damage taken (the damage sets it off: BossKits.IsDamageTakenTrigger) or an aura (it stands on
+                // the monster: MonsterSkills.Auras).
+                if (skills.IsMovement(effect) || skills.CastsOnDeath(effect) || MonsterSkills.IsCorpseSkill(effect)
+                    || BossKits.IsDamageTakenTrigger(skills, effect) || skills.IsAura(effect)) continue;
                 string? id = skills.EffectId(effect);
                 if (id is not null && (id.Contains("Teleport", StringComparison.Ordinal)
                     || id.Contains("Daemon", StringComparison.Ordinal)
@@ -69,14 +73,21 @@ public static partial class Game
                     // client linked it to entity 0 (0x141a2bbb0, live 2026-11-05). His DominusLightningSlam is the swing.
                     || id.Contains("Bond", StringComparison.Ordinal)
                     || id.Contains("Mark", StringComparison.Ordinal)
-                    || id.Contains("Souls", StringComparison.Ordinal))) continue;
+                    || id.Contains("Souls", StringComparison.Ordinal)
+                    // Corpse-utility spells deal no direct hit damage and require a corpse target the ordinary AI does
+                    // not supply (e.g. Stygian Revenant's RevenantReviveUndead, Avian Retch's BirdmanConsumeCorpse).
+                    || id.Contains("Revive", StringComparison.Ordinal)
+                    || id.Contains("ConsumeCorpse", StringComparison.Ordinal)
+                    || id.Contains("Emerge", StringComparison.Ordinal))) continue;
                 if (!(skills.IsAttack(effect) || skills.IsSpell(effect) || skills.IsProjectile(effect))) continue;
                 if (Shot(skills, effect) is not null) return effect;
                 fallback ??= effect;
             }
-            // The leap's damage row asks Goatman2.act for GroundSlam. Use the monster's
-            // ordinary swing when it has one; keep the damage row for payload-only actors.
-            if (fallback is int chosen && skills.EffectId(chosen) == "GAGoatmanLeapSlamDamage")
+            // A GA* GeometryAttack payload (e.g. GAGoatmanLeapSlamDamage, GANavaliGoatmanLeapDamage) is a secondary
+            // hit paired with a leap rather than an ordinary swing. Use the monster's ordinary swing when it has one;
+            // keep the damage row for payload-only actors.
+            if (fallback is int chosen && skills.EffectId(chosen) is { } fallbackId
+                && BossKits.IsLeapDamagePayload(fallbackId, chosen))
                 foreach (int effect in effects)
                     if (skills.EffectId(effect)?.StartsWith("MeleeAtAnimationSpeed", StringComparison.Ordinal) == true)
                         return effect;

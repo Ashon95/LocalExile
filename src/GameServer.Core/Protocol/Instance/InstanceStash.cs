@@ -11,7 +11,7 @@ namespace GameServer.Core.Protocol.Instance;
 public static class InstanceStash
 {
     public const ushort TabListId = 0x136, TabLoadedId = 0xc8, RequestTabId = 0xc7, ReorderTabsId = 0xcc, MoveTabId = 0xd1,
-        RenameTabId = 0xcd, ColourTabId = 0xce;
+        RenameTabId = 0xcd, ColourTabId = 0xce, PublicTabId = 0xcf;
 
     /// <summary>S→C 0x7b kind that opens the personal stash (0x142169dd0 case 1 → listeners at instance +0x1178 →
     /// 0x140dcae70): u32 a = the Stash object, u32 b = an affinity (StashTabAffinityId row): the panel selects the first tab
@@ -25,6 +25,8 @@ public static class InstanceStash
     public const byte Personal = 0;
     /// <summary>The guild stash: 0x136 / 0xc8 kind 1; S→C 0x7b kind 2 opens its panel (listener 0x140dcb010, tabs at instance +0xc4b0).</summary>
     public const byte Guild = 1, OpenGuildStashUi = 2;
+    /// <summary>The async-trade merchant stash: 0x136 / 0xc7 / 0xc8 kind 2; S→C 0x7b kind 0x63 opens its panel (0x142169ebf, tabs at instance +0xc4c8).</summary>
+    public const byte Trade = 2, OpenAsyncTradeStashUi = InstanceAsyncTrade.OpenUiKind;
 
     /// <summary>The guild stash tabs' inventory manager in S→C 0xc0 (instance +0xcb90); the personal stash uses 0.</summary>
     public const byte GuildManager = 2;
@@ -45,8 +47,10 @@ public static class InstanceStash
         Bit0 = 0x01,
         /// <summary>A premium tab: the tab settings can rename and recolour it.</summary>
         Premium = 0x02,
-        /// <summary>→ panel tab +0x38 bit 6 (remove-only in the real game, not checked).</summary>
-        Bit3 = 0x08,
+        /// <summary>Public premium tab (0x14216e103 sets/clears bit 3; C→S 0xcf).</summary>
+        Public = 0x08,
+        /// <summary>Alias for <see cref="Public"/> (panel tab +0x38 bit 6).</summary>
+        Bit3 = Public,
         /// <summary>A u8 (+0x3c) follows the record.</summary>
         HasByte = 0x10,
         /// <summary>A u64 (+0x00) follows; such a tab is left out of the panel.</summary>
@@ -62,7 +66,7 @@ public static class InstanceStash
     /// Loaded (flag bit 9, +0x3e bit 1): the contents are known; S→C 0xc8 sets it.</summary>
     public sealed record Tab(ushort Index, string Name, uint Inventory, byte Type, byte R, byte G, byte B,
         TabFlags Flags = TabFlags.None, ushort Position = 0, ushort Parent = 0xffff, uint Affinities = 0, bool Loaded = false,
-        string Id = "", uint U2c = 0, ulong HiddenKey = 0);
+        string Id = "", uint U2c = 0, ulong HiddenKey = 0, bool Hidden = false);
 
     /// <summary>A tab record (0x141d50880): u32 BE inventory id (+0x28), u32 BE (+0x2c, copied to the panel tab's +0x30),
     /// wstr name (+0x08), str id (+0x48), u16 BE position (+0x38), two flag bytes (+0x3d, +0x3e), u16 BE parent (+0x3a),
@@ -71,11 +75,12 @@ public static class InstanceStash
     {
         var flags = t.Flags & ~(TabFlags.Hidden | TabFlags.HasByte | TabFlags.Affinities);
         if (t.Affinities != 0) flags |= TabFlags.Affinities;
-        if (t.HiddenKey != 0) flags |= TabFlags.Hidden;
+        bool hidden = t.HiddenKey != 0 || t.Hidden;
+        if (hidden) flags |= TabFlags.Hidden;
         w.U32(t.Inventory).U32(t.U2c).WStr(t.Name);
         StrNarrow(w, t.Id);
         w.U16(t.Position).U8((byte)flags).U8((byte)(t.Loaded ? 0x02 : 0)).U16(t.Parent).U8(t.R).U8(t.G).U8(t.B).U8(t.Type);
-        if (t.HiddenKey != 0) w.Bytes(BitConverter.GetBytes(t.HiddenKey));
+        if (hidden) w.Bytes(BitConverter.GetBytes(t.HiddenKey));
         // The affinity bitset is copied raw (memcpy to +0x3f), so it goes little-endian.
         if (t.Affinities != 0) w.U8((byte)t.Affinities).U8((byte)(t.Affinities >> 8)).U8((byte)(t.Affinities >> 16)).U8((byte)(t.Affinities >> 24));
         return w;
@@ -128,12 +133,17 @@ public static class InstanceStash
 
     /// <summary>C→S 0xcd (vtable 0x1435cab10, write 0x141f9ccd0; built by the tab settings 0x14025b9b0): a premium tab
     /// renamed. u8 kind, u16 BE tab, u64 (0), wstr name.</summary>
-    public static int? RenameTabLength(ReadOnlySpan<byte> m)
+    public static int? RenameTabLength(ReadOnlySpan<byte> m) =>
+        MeasureRenameTabLength(m, out int length) == WireMeasure.Ok ? length : null;
+
+    internal static WireMeasure MeasureRenameTabLength(ReadOnlySpan<byte> m, out int length)
     {
-        var r = new LoginReader(m);
-        r.U16(); r.U8(); r.U16(); r.U32(); r.U32();
-        r.WStr();
-        return r.Short ? null : r.Position;
+        length = 0;
+        if (m.Length < 13) return WireMeasure.Incomplete;
+        var status = LoginReader.TryMeasureWStr(m[13..], out int textLength);
+        if (status != WireMeasure.Ok) return status;
+        length = 13 + textLength;
+        return WireMeasure.Ok;
     }
 
     public static (byte Kind, ushort Tab, string Name) ReadRenameTab(ReadOnlySpan<byte> m)
@@ -154,6 +164,13 @@ public static class InstanceStash
     public static (byte Kind, ushort Tab, uint Colour) ReadColourTab(ReadOnlySpan<byte> m) =>
         (m[2], (ushort)(m[3] << 8 | m[4]), System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(m[13..]));
 
+    /// <summary>C→S 0xcf (14 bytes, writer 0x141f9d290, sender 0x14216e070): toggle a premium tab's Public flag.
+    /// u8 kind, u16 BE tab, u64 (0), u8 isPublic (sets/clears <see cref="TabFlags.Public"/> bit 3).</summary>
+    public const int PublicTabLength = 14;
+
+    public static (byte Kind, ushort Tab, bool IsPublic) ReadPublicTab(ReadOnlySpan<byte> m) =>
+        (m[2], (ushort)(m[3] << 8 | m[4]), m[13] != 0);
+
     public static (byte Kind, List<(ushort Index, ushort Position)> Order) ReadReorderTabs(ReadOnlySpan<byte> m)
     {
         var order = new List<(ushort, ushort)>();
@@ -161,11 +178,70 @@ public static class InstanceStash
         return (m[2], order);
     }
 
+    /// <summary>S→C 0xcc (reader <c>0x141f9cbd0</c>, vector <c>0x141faaa80</c>, dispatcher case <c>0x3e</c> at
+    /// <c>0x142155ec1</c>): guild stash tab reorder broadcast. Same wire layout as C→S 0xcc: <c>u16 BE 0x00cc</c>,
+    /// <c>u8 kind</c> (<see cref="Guild"/> = 1), <c>u8 count</c>, <c>count × (u16 BE tab index, u16 BE position)</c>.</summary>
+    public static byte[] EncodeReorderTabs(byte kind, IReadOnlyList<(ushort Index, ushort Position)> order)
+    {
+        if (order.Count > byte.MaxValue) throw new ArgumentOutOfRangeException(nameof(order));
+        var w = new LoginWriter().U16(ReorderTabsId).U8(kind).U8((byte)order.Count);
+        foreach (var (index, position) in order) w.U16(index).U16(position);
+        return w.ToArray();
+    }
+
     /// <summary>C→S 0xd1 (7 bytes, vtable 0x1435cabd0, write 0x141f9d680; 0x14216dd20): a tab into a folder. u16 BE tab,
-    /// u16 BE folder (0xffff: out of it), u8 kind.</summary>
+    /// u16 BE folder (0xffff: out of it; the tab's own index: into a new folder), u8 kind.</summary>
     public const int MoveTabLength = 7;
 
-    public const ushort MoveToTabId = 0xe0, TakeFromTabId = 0xe3;
+    public static (byte Kind, ushort Tab, ushort Folder) ReadMoveTab(ReadOnlySpan<byte> m) =>
+        (m[6], (ushort)(m[2] << 8 | m[3]), (ushort)(m[4] << 8 | m[5]));
+
+    /// <summary>C→S 0xd2 (5 bytes, the class of 0xc7; sent by the folder settings' "Delete Folder", 0x14025c5c0, after it
+    /// cleared the folder from the tabs in it on its own side): u16 BE folder tab, u8 kind.</summary>
+    public const ushort DeleteFolderId = 0xd2;
+    public const int DeleteFolderLength = 5;
+
+    public static (byte Kind, ushort Folder) ReadDeleteFolder(ReadOnlySpan<byte> m) => (m[4], (ushort)(m[2] << 8 | m[3]));
+
+    public const ushort MoveToTabId = 0xe0, QuickPlaceInTabId = 0xe2, TakeFromTabId = 0xe3,
+        SubTabClickId = 0x2b, CollectionToStashId = 0x114;
+
+    /// <summary>C→S 0x00e2 (9 bytes, writer 0x141f9e6d0, sender 0x140b1df20): click on a specialty/Unique/Map stash tab
+    /// while holding an item on the cursor to quick-place it. u16 BE tab (+2), u32 BE item id (+4), u8 kind (+8: 0 personal, 1 guild).</summary>
+    public const int QuickPlaceInTabLength = 9;
+    public readonly record struct QuickPlaceInTab(ushort Tab, uint ItemId, byte Kind);
+
+    public static QuickPlaceInTab ReadQuickPlaceInTab(ReadOnlySpan<byte> m)
+    {
+        var r = new LoginReader(m[2..]);
+        return new(r.U16(), r.U32(), r.U8());
+    }
+
+    /// <summary>C→S 0x002b (21 bytes, writer 0x141f96570, senders 0x140b3b770 / 0x140b7fae0): click a cell on a specialty
+    /// sub-tab (Map page or Unique category). u8 kind (+2), u16 BE tab (+3), u64 LE subTabKey (+5..+12), u32 BE x (+13), u32 BE y (+17).</summary>
+    public const int SubTabClickLength = 21;
+    public readonly record struct SubTabClick(byte Kind, ushort Tab, ulong SubTabKey, uint X, uint Y);
+
+    public static SubTabClick ReadSubTabClick(ReadOnlySpan<byte> m)
+    {
+        byte kind = m[2];
+        ushort tab = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(m[3..]);
+        ulong subTabKey = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(m[5..]);
+        uint x = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(m[13..]);
+        uint y = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(m[17..]);
+        return new(kind, tab, subTabKey, x, y);
+    }
+
+    /// <summary>C→S 0x0114 (16 bytes, writer 0x141fa08c0, sender 0x1403133bb): Ctrl + click an item in row 0x72
+    /// (DeepwaterCollectionInventory1) to move it directly into the open personal stash tab.
+    /// u32 BE item id (+2), u16 BE tab (+6), u64 LE subTabKey (+8..+15).</summary>
+    public const int CollectionToStashLength = 16;
+    public readonly record struct CollectionToStash(uint ItemId, ushort Tab, ulong SubTabKey);
+
+    public static CollectionToStash ReadCollectionToStash(ReadOnlySpan<byte> m) =>
+        new(System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(m[2..]),
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(m[6..]),
+            System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(m[8..]));
 
     /// <summary>C→S 0xe0: Ctrl + click on an inventory item while a stash tab is shown. Tab: the shown tab's index (the
     /// stash page's +0x4a4); Kind: the page's stash kind (+0x491); Flags: bit 0 (unknown, 0 live), <see cref="MoveAllOfType"/>; Token: a u16
@@ -202,7 +278,44 @@ public static class InstanceStash
 
     public const int TakeFromTabLength = 12;
 
-    public const ushort MoveToAffinityTabId = 0xe1, SetAffinitiesId = 0xd3;
+    /// <summary>C→S 0xf5 (12 bytes, writer 0x141f9a550, sender 0x1403136e1): take an oil/item out of a special stash tab
+    /// (Blight tab oil row). u32 BE item id (+2), u8 kind (+6), u32 BE tab (+7), u8 uiPanelState (+11, UI panel state
+    /// at 0x1403136d5/0x140313879, not a Ctrl+Right-Click bulk flag).</summary>
+    public const ushort TakeBlightOilId = 0xf5;
+    public const int TakeBlightOilLength = 12;
+
+    public readonly record struct TakeBlightOil(uint ItemId, byte Kind, uint Tab, byte UiPanelState);
+
+    public static TakeBlightOil ReadTakeBlightOil(ReadOnlySpan<byte> m)
+    {
+        var r = new LoginReader(m[2..]);
+        return new(r.U32(), r.U8(), r.U32(), r.U8());
+    }
+
+    public const ushort MoveToAffinityTabId = 0xe1, SetAffinitiesId = 0xd3,
+        AffinityMoveResultId = 0xd5, PersonalStashTabId = 0xd6;
+    /// <summary>Sentinel tab index in S→C 0x00d5 indicating a league locker rather than a stash tab.</summary>
+    public const ushort LockerTabIndex = 0xffff;
+
+    /// <summary>
+    /// S→C 0x00d5 (class 0x1435e6fe0, read 0x1421aab70; dispatcher case 0x40 at 0x14215483e..0x142154cec → HUD
+    /// 0x140dd8890): result of a C→S 0x00e1 affinity deposit. u8 success, u16 BE tab (child tab index for Map/Unique
+    /// tabs so the HUD resolves Parent and HiddenKey, or <see cref="LockerTabIndex"/> for a league locker), u8 cellX,
+    /// u8 affinity (StashTabAffinityId row), u8 stashKind (0 personal, 1 guild).
+    /// </summary>
+    public static byte[] EncodeAffinityMoveResult(bool success, ushort tab, byte cellX, byte affinity, byte stashKind = Personal) =>
+        new LoginWriter().U16(AffinityMoveResultId).U8((byte)(success ? 1 : 0)).U16(tab).U8(cellX).U8(affinity).U8(stashKind).ToArray();
+
+    /// <summary>
+    /// S→C 0x00d6 (class 0x1435e6da0, read 0x1421aae00; dispatcher case 0x41 at 0x142154cf1..0x142154d2e): updates a
+    /// personal stash tab's narrow id string (+0x48). u16 BE tab index, narrow UTF-8 string (u16 BE length + bytes).
+    /// </summary>
+    public static byte[] EncodePersonalStashTabId(ushort tab, string id)
+    {
+        var w = new LoginWriter().U16(PersonalStashTabId).U16(tab);
+        StrNarrow(w, id);
+        return w.ToArray();
+    }
 
     /// <summary>C→S 0xe1: Ctrl + click on an inventory item with an affinity tab while the stash is open. Tabs: the tabs
     /// the client picked for it, each with the affinity (StashTabAffinityId row) it matched.</summary>
@@ -232,8 +345,11 @@ public static class InstanceStash
     /// an orb: <c>00E1 000037D5 02 00 6A7D 01 0005 03</c>. The server moves every stack of that type, as the player asked.</summary>
     public const byte MoveAllOfType = 0x02;
 
-    /// <summary>C→S 0xd3: the tab settings' affinities, confirmed (the window's check mark).</summary>
-    public sealed record SetAffinities(ushort Tab, byte Kind, IReadOnlyList<(byte Affinity, bool On)> Changes);
+    /// <summary>C→S / S→C 0xd3: stash tab affinity updates (tab settings confirmation or guild stash broadcast).</summary>
+    public sealed record SetAffinities(ushort Tab, byte Kind, IReadOnlyList<(byte Affinity, bool On)> Changes)
+    {
+        public byte[] Encode() => EncodeSetAffinities(Tab, Kind, Changes);
+    }
 
     /// <summary>
     /// C→S 0xd3 (class 0x1435cad70, read 0x141f9d9a0, write 0x141f9d7d0; built by 0x14216de70): u16 BE tab, u8 kind, u8 n,
@@ -247,6 +363,19 @@ public static class InstanceStash
         var changes = new List<(byte, bool)>();
         for (int i = 0, n = r.U8(); i < n; i++) changes.Add((r.U8(), r.U8() != 0));
         return new(tab, kind, changes);
+    }
+
+    /// <summary>
+    /// S→C 0xd3 (class 0x1435cad70, read 0x141f9d9a0, write 0x141f9d7d0; dispatcher case 0x3f at 0x142155f46 →
+    /// 0x142174850): guild stash tab affinity broadcast. Uses the same wire layout as C→S 0xd3: u16 BE 0x00d3, u16 BE
+    /// tab, u8 kind (<see cref="Guild"/> = 1; dispatcher ignores other kinds), u8 count, count × (u8 affinity, u8 on).
+    /// </summary>
+    public static byte[] EncodeSetAffinities(ushort tab, byte kind, IReadOnlyList<(byte Affinity, bool On)> changes)
+    {
+        if (changes.Count > byte.MaxValue) throw new ArgumentOutOfRangeException(nameof(changes));
+        var w = new LoginWriter().U16(SetAffinitiesId).U16(tab).U8(kind).U8((byte)changes.Count);
+        foreach (var (affinity, on) in changes) w.U8(affinity).U8((byte)(on ? 1 : 0));
+        return w.ToArray();
     }
 
     /// <summary>The length of a C→S 0xd3 at the start of <paramref name="m"/>, or null until its count arrived.</summary>
@@ -269,8 +398,7 @@ public sealed record StashObject(int GridX, int GridY, float Rotation = 0)
     {
         var w = new BlobWriter();
         w.U8(0).U8(0);                                                              // object flags, base data entry count
-        // As an NPC's: x, y, rotation, u16 team 0, flags0, flags1 0x02 + two u8 (shown).
-        w.I32(GridX).I32(GridY).F32(Rotation).U16(0).U8(0).U8(0x02).U8(0).U8(1);
+        w.Positioned(GridX, GridY, Rotation);                                       // Positioned
         w.U8(0);                                                                    // Animated: the type's model
         w.U8(0);                                                                    // MinimapIcon flags
         w.U8(0);                                                                    // InteractionAction flags

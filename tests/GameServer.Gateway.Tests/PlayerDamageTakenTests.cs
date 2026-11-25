@@ -4,8 +4,8 @@ namespace GameServer.Gateway.Tests;
 
 public class PlayerDamageTakenTests
 {
-    static Func<string, int> With(params (string Stat, int Value)[] stats) =>
-        name => stats.Where(s => s.Stat == name).Sum(s => s.Value);
+    static Func<uint, int> With(params (string Stat, int Value)[] stats) =>
+        name => stats.Where(s => Stat.Of(s.Stat) == name).Sum(s => s.Value);
 
     static DamagePacket Hit(params (DamageType Type, int Amount)[] parts) =>
         parts.Aggregate(DamagePacket.Empty, (hit, p) => hit.Add(p.Type, new DamageRange(p.Amount, p.Amount)));
@@ -24,7 +24,7 @@ public class PlayerDamageTakenTests
     [Fact]
     public void A_hit_shifts_once_then_avoids_and_takes_flat_increased_blocked_and_mana_damage()
     {
-        Assert.All(PlayerDamageTaken.StatNames, name => Assert.NotNull(Program.Stats.Key(name)));
+        Assert.All(PlayerDamageTaken.StatNames, name => Assert.True(StatCatalog.IsClientId(name)));
 
         var physical = Hit((DamageType.Physical, 100));
         Assert.Same(physical, PlayerDamageTaken.Shift(physical, With()));
@@ -124,8 +124,8 @@ public class PlayerDamageTakenTests
 
         // With no ward or energy shield, the hit pool takes Mind Over Matter's 40 of a 100 hit from mana. The pool only takes
         // hits while the game's rules are active and the player lives.
-        var conn = new ClientState(new(1, "mana-before-life", 100, 100, 100, 100, null, []), 0, 1) { PlayerLife = 100 };
-        var stats = new Dictionary<uint, int> { [Program.Stats.Key("keystone_mana_shield")!.Value] = 1 };
+        var player = new Player(new(1, "mana-before-life", 100, 100, 100, 100, null, []), 0, 1) { PlayerLife = 100 };
+        var stats = new Dictionary<uint, int> { [Stat.KeystoneManaShield] = 1 };
         var previousLogic = Program.GameLogicOrNull;
         var previousLifetime = global::Game.CombatLifetime;
         var lifetime = new ModuleLifetime("Game");
@@ -133,13 +133,10 @@ public class PlayerDamageTakenTests
         Program.SetGameLogic(new GameServer.Modules.Game.GameLogic());
         try
         {
-            lock (conn.Monsters)
-            {
-                conn.PlayerMana = 100;
-                Assert.Equal(60, global::Game.DamagePlayerHit(conn, 100, 0, conn.Clock.Elapsed.TotalSeconds, stats,
-                    Hit((DamageType.Physical, 100))));
-                Assert.Equal(60u, conn.PlayerMana);
-            }
+            player.PlayerMana = 100;
+            Assert.Equal(60, global::Game.DamagePlayerHit(player, 100, 0, player.Clock.Elapsed.TotalSeconds, stats,
+                Hit((DamageType.Physical, 100))));
+            Assert.Equal(60u, player.PlayerMana);
         }
         finally
         {
@@ -149,37 +146,103 @@ public class PlayerDamageTakenTests
         }
     }
 
+    // A synthetic contact -- which is how a shrine's and a strongbox daemon's spell damage is committed -- goes through
+    // the player's whole defence as a monster's hit does, and "damage taken as" splits the hit before any mitigation.
+    // With 50% of Physical Damage from Hits taken as Fire and 50% Fire Resistance, 200 physical is 100 physical +
+    // 100 fire at half = 150; the hit that ignored the shift took 200.
+    [Fact]
+    public void A_synthetic_spell_hit_takes_physical_damage_as_fire_and_meets_the_fire_resistance()
+    {
+        var plain = SyntheticPhysicalHit("plain", shifted: false, armour: 0, out var plainPlayer);
+        var asFire = SyntheticPhysicalHit("asfire", shifted: true, armour: 0, out var asFirePlayer);
+        Assert.Equal(200, plain.Damage);
+        Assert.Equal(800u, plainPlayer.PlayerLife);
+        Assert.Equal(150, asFire.Damage);
+        Assert.Equal(850u, asFirePlayer.PlayerLife);
+        Assert.Equal(150, (int)asFire.Taken[DamageType.Fire].Min + (int)asFire.Taken[DamageType.Physical].Min);
+    }
+
+    // Armour is one decision for the hit but reduces only the physical part: with half of the physical hit taken as fire,
+    // the fire part meets resistance alone, whatever the armour (a fire part is not armoured, and a part the shift made
+    // physical would be).
+    [Fact]
+    public void A_synthetic_hit_with_a_fire_part_lets_armour_reduce_only_the_physical_part()
+    {
+        var hit = SyntheticPhysicalHit("armour", shifted: true, armour: 1_000_000, out var player);
+        int expectedPhysical = DamageModel.Reduce(100, DamageModel.ArmourReduction(1_000_000, 100));
+        Assert.Equal(100, (int)hit.Taken[DamageType.Fire].Min);
+        Assert.Equal(expectedPhysical, (int)hit.Taken[DamageType.Physical].Min);
+        Assert.Equal(100 + expectedPhysical, hit.Damage);
+        Assert.Equal(1000u - (uint)hit.Damage, player.PlayerLife);
+    }
+
+    static Game.SyntheticEnemyHit SyntheticPhysicalHit(string name, bool shifted, int armour, out Player player)
+    {
+        TestEnvironment.OpenOwnSaves("synthetic-taken-as-" + name);
+        var previousLogic = Program.GameLogicOrNull;
+        var previousLifetime = Game.CombatLifetime;
+        var lifetime = new ModuleLifetime("Game");
+        Game.CombatLifetime = lifetime;
+        Program.SetGameLogic(new GameServer.Modules.Game.GameLogic(lifetime));
+        try
+        {
+            var created = new Player(new(1, "synthetic-taken-as", 1000, 1000, 100, 100, null, []), 1, 1)
+            {
+                Character = { Name = "SyntheticTakenAs" + name },
+                PlayerLife = 1000, PlayerMana = 100, Instance = new(), EvasionEntropy = 100,
+                IncomingHitRandom = new Random(7),
+                Pools = new(1, 1000, 100, 0, 0, Armour: armour, FireResistance: shifted && armour == 0 ? 50 : 0),
+            };
+            player = created;
+            uint takenAs = Program.Stats.Key("physical_damage_taken_%_as_fire")!.Value;
+            using var stats = GameEvents.PlayerStatSources.Add("Game", (owner, values) =>
+            {
+                if (shifted && ReferenceEquals(owner, created)) values[takenAs] = 50;
+                return values;
+            });
+            Assert.True(Game.TrySyntheticEnemyHit(created, DamageType.Physical, 200, block: false, spell: true,
+                suppress: false, out var hit));
+            return hit;
+        }
+        finally
+        {
+            Program.SetGameLogic(previousLogic!);
+            Game.CombatLifetime = previousLifetime;
+            TestEnvironment.ReleaseOwnSaves();
+        }
+    }
+
     // Chill reads the damage taken, so physical taken as cold chills; ignite reads the damage dealt, so fire taken as
     // physical still ignites on a critical strike (wiki Damage taken as, "Ailments and damage over time"), but only the
     // part that lands: avoided fire cannot ignite.
     [Fact]
     public void Ailments_read_the_shifted_damage_taken_but_ignite_reads_the_damage_dealt_that_lands()
     {
-        var conn = new ClientState(new(1, "taken-as", 100, 100, 100, 100, null, []), 0, 1);
-        lock (conn.Monsters) { conn.Pools = conn.Pools with { Life = 1000 }; conn.PlayerLife = 1000; }
+        var player = new Player(new(1, "taken-as", 100, 100, 100, 100, null, []), 0, 1);
+        player.Pools = player.Pools with { Life = 1000 }; player.PlayerLife = 1000;
         var stats = new Dictionary<uint, int>();
-        double now = conn.Clock.Elapsed.TotalSeconds;
+        double now = player.Clock.Elapsed.TotalSeconds;
 
         var physical = Hit((DamageType.Physical, 100));
-        lock (conn.Monsters) global::Game.ApplyPlayerAilmentsLocked(conn, physical, physical, false, false, now, stats);
-        Assert.Equal(0, conn.ElementalAilments.Snapshot(now).Chill);
+        global::Game.ApplyPlayerAilmentsLocked(player, physical, physical, false, false, now, stats);
+        Assert.Equal(0, player.ElementalAilments.Snapshot(now).Chill);
         var asCold = Hit((DamageType.Physical, 50), (DamageType.Cold, 50));
-        lock (conn.Monsters) global::Game.ApplyPlayerAilmentsLocked(conn, physical, asCold, false, false, now, stats);
-        Assert.Equal(15, conn.ElementalAilments.Snapshot(now).Chill);   // floor(50 × 0.05^0.4)
+        global::Game.ApplyPlayerAilmentsLocked(player, physical, asCold, false, false, now, stats);
+        Assert.Equal(15, player.ElementalAilments.Snapshot(now).Chill);   // floor(50 × 0.05^0.4)
 
-        conn.ElementalAilments.Clear();
+        player.ElementalAilments.Clear();
         var fire = Hit((DamageType.Fire, 100));
-        lock (conn.Monsters) global::Game.ApplyPlayerAilmentsLocked(conn, fire, Hit((DamageType.Physical, 100)), true, false, now, stats);
-        var ailments = conn.ElementalAilments.Snapshot(now);
+        global::Game.ApplyPlayerAilmentsLocked(player, fire, Hit((DamageType.Physical, 100)), true, false, now, stats);
+        var ailments = player.ElementalAilments.Snapshot(now);
         Assert.True(ailments.Ignite);
         Assert.Equal(0, ailments.Chill);
         Assert.False(ailments.Freeze);
 
-        conn.ElementalAilments.Clear();
+        player.ElementalAilments.Clear();
         var cold = Hit((DamageType.Cold, 50));
         var landed = PlayerDamageTaken.Landed(Hit((DamageType.Fire, 100), (DamageType.Cold, 50)), With(), [DamageType.Fire]);
-        lock (conn.Monsters) global::Game.ApplyPlayerAilmentsLocked(conn, landed, cold, true, false, now, stats);
-        Assert.False(conn.ElementalAilments.Snapshot(now).Ignite);
-        Assert.True(conn.ElementalAilments.Snapshot(now).Chill > 0);
+        global::Game.ApplyPlayerAilmentsLocked(player, landed, cold, true, false, now, stats);
+        Assert.False(player.ElementalAilments.Snapshot(now).Ignite);
+        Assert.True(player.ElementalAilments.Snapshot(now).Chill > 0);
     }
 }

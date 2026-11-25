@@ -2,7 +2,7 @@
 # Regenerate the input with (about 15 s):
 #   bash scripts/re/ghidra/g.sh SendSites.java 'C:\...\Tools\re\out\sendsites.json'
 # Also reads Tools/re/out/decomp-all (writer lengths), Tools/re/out/readschema.json (shared S->C classes) and
-# Client/Game.exe (vtable slots). Exits 1 if an exact length disagrees with the Gateway's KnownClientLength.
+# Client/Game.exe (vtable slots). Exits 1 if an exact length disagrees with the Gateway's ClientPackets.
 import argparse, collections, json, os, re, struct, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,13 +66,19 @@ def writer(fa):
     """Bytes a writer writes: the sum of its fixed-size stream writes; exact when it has no variable write, no call
     that takes the stream and no branch or loop."""
     t = src("%09x" % fa)
+    # Comments and quoted text are not executable decompiler C; spaces keep adjacent tokens separate.
+    t = re.sub(r"""\/\*.*?\*/|//[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""",
+               " ", t or "", flags=re.S)
     if not t or "{" not in t: return None
     body = t.split("{", 1)[1]
-    fixed = sum(int(n, 0) for n in re.findall(r"FUN_140dfa000\([^,]+,[^,]+,(0x[0-9a-f]+|\d+)\)", body))
-    var = re.search(r"FUN_140dfa000\([^,]+,[^,]+,[^)0-9][^)]*\)", body)
+    writes = re.findall(r"\bFUN_140dfa000\s*\(([^,;]+,[^,;]+),\s*(0x[0-9a-f]+|\d+)\s*\)", body)
+    # A comma inside a nested argument can make its literal look like the outer call's size.
+    sizes = [int(n, 0) for prefix, n in writes if prefix.count("(") == prefix.count(")")]
+    fixed = sum(sizes)
+    all_fixed = len(sizes) == len(re.findall(r"\bFUN_140dfa000\s*\(", body))
     calls = set(re.findall(r"(FUN_1[0-9a-f]{8})\([^;]*param_2", body)) - {"FUN_140dfa000"}
-    branch = re.search(r"\b(if|for|while|do)\b", body)
-    return fixed, not var and not calls and not branch
+    branch = re.search(r"\b(if|for|while|do|switch)\b|\?", body)
+    return fixed, all_fixed and not calls and not branch
 
 def gateway_framing():
     """Read the fixed table and the instance IDs with their own framing."""
@@ -88,53 +94,46 @@ def gateway_framing():
                 continue
             for declaration in re.findall(r"\bconst\s+(?:ushort|int|byte)\s+([^;]+);", text):
                 for part in declaration.split(","):
-                    pair = re.fullmatch(r"\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*", part)
+                    pair = re.fullmatch(r"\s*(\w+)\s*=\s*(\w+(?:\.\w+)?)\s*", part)
                     if pair:
-                        constants[f"{cls[1]}.{pair[1]}"] = int(pair[2], 0)
+                        constants[f"{cls[1]}.{pair[1]}"] = pair[2]
 
     def resolve(token):
-        if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", token):
-            return int(token, 0)
-        qualified = token if "." in token else f"InstanceProtocol.{token}"
-        if qualified not in constants:
-            raise ValueError(f"cannot resolve Gateway constant {token}")
-        return constants[qualified]
+        owner, seen = "InstanceProtocol", set()
+        while not re.fullmatch(r"0x[0-9a-fA-F]+|\d+", token):
+            qualified = token if "." in token else f"{owner}.{token}"
+            if qualified not in constants or qualified in seen:
+                raise ValueError(f"cannot resolve Gateway constant {qualified}")
+            seen.add(qualified)
+            owner, token = qualified.split(".")[0], constants[qualified]
+        return int(token, 0)
 
-    protocol = os.path.join(REPO, "src", "GameServer.Core", "Protocol", "Instance", "InstanceProtocol.cs")
-    with open(protocol, encoding="utf-8") as source:
+    catalog = os.path.join(REPO, "src", "GameServer.Core", "Protocol", "Instance", "ClientPackets.cs")
+    with open(catalog, encoding="utf-8") as source:
         text = re.sub(r"//[^\n]*", "", source.read())
+    _, found, rows = text.partition("static readonly ClientPacket[] Rows =")
+    rows, closed, _ = rows.partition("];")
+    if not (found and closed):
+        raise ValueError("cannot locate the ClientPackets rows")
+    # The catalog groups unnamed fixed packets of one length in a ushort array.
+    def expand_group(match):
+        ids, length = match.groups()
+        return ",".join(f"P({packet_id.strip()}, {length})" for packet_id in ids.split(","))
 
-    def section(start, end):
-        _, start_found, rest = text.partition(start)
-        body, end_found, _ = rest.partition(end)
-        if not (start_found and end_found):
-            raise ValueError(f"cannot locate {start} in InstanceProtocol")
-        return body
-
-    _, opening, table = section("KnownClientLength(ushort id) => id switch", "};").partition("{")
-    if not opening:
-        raise ValueError("cannot locate the KnownClientLength switch body")
-    fixed = {}
-    for part in table.split(","):
-        if not part.strip():
-            continue
-        arm = re.fullmatch(r"([\w.]+)\s*=>\s*([\w.]+)", part.strip())
-        if not arm:
-            raise ValueError(f"unsupported KnownClientLength arm {part.strip()}")
-        key, length = arm.groups()
-        if (key, length) == ("_", "null"):
-            continue
-        packet_id = resolve(key)
-        if packet_id in fixed:
-            raise ValueError(f"duplicate Gateway fixed length for {packet_id:#06x}")
-        fixed[packet_id] = resolve(length)
-
-    framers = section("int? known =", ": KnownClientLength(id);")
-    patterns = re.findall(r"(?m)^\s*:?\s*id\s+(?:==|is)\s+([\w.]+(?:\s+or\s+[\w.]+)*)\s*\?", framers)
-    if len(patterns) != len(re.findall(r"(?<!\?)\?(?!\?)", framers)):
-        raise ValueError("unsupported SplitClientMessages framing condition")
-    excluded = {resolve("TicketId"), resolve("HelloId")}
-    excluded.update(resolve(token) for pattern in patterns for token in re.split(r"\s+or\s+", pattern))
+    rows = re.sub(r"\.\.\s*new ushort\[\]\s*\{([^}]+)\}\.Select\(id => P\(id, (\d+), name: [^)]*\)\)",
+                  expand_group, rows)
+    if ".." in rows:
+        raise ValueError("unsupported group in ClientPackets rows")
+    fixed, excluded = {}, {resolve("TicketId"), resolve("HelloId")}
+    for kind, args in re.findall(r"\b([PV])\(([^()]*)\)", rows):
+        parts = [part.strip() for part in args.split(",")]
+        packet_id = resolve(parts[0])
+        if packet_id in fixed or packet_id in excluded:
+            raise ValueError(f"duplicate ClientPackets row for {packet_id:#06x}")
+        if kind == "V":
+            excluded.add(packet_id)
+        else:
+            fixed[packet_id] = resolve(parts[1])
     return fixed, excluded
 
 
@@ -273,9 +272,10 @@ def generate(sendsites):
           "S→C classes locally (S→C instance 0xc0 is fed to the client's own handler through `0x141d65c80`; that is not a",
           "send and is not listed here).", "",
           "**Length** is the whole message in bytes, id included, when the writer is exact (only fixed-size stream writes,",
-          "no branch, no call that takes the stream). `≥ N` = N fixed bytes plus variable or conditional parts.", "",
+          "no branch, no call that takes the stream). `unknown` means no exact length was established;",
+          "the sum of fixed writes is not a lower bound when writes may be conditional.", "",
           "## Validation against the Gateway", "",
-          f"`InstanceProtocol.KnownClientLength` has {len(gw)} fixed lengths: {agree} agree with an exact extracted length, "
+          f"`ClientPackets` has {len(gw)} fixed lengths: {agree} agree with an exact extracted length, "
           f"{len(bad)} disagree" + (": " + ", ".join(f"{i:#x} (Gateway {n}, extracted {x})" for i, n, x in bad) if bad else "")
           + (f"; {len(missing)} not found: " + ", ".join(f"{i:#x}" for i in missing) if missing else "")
           + (f"; {len(nolen)} have no exact extracted length (branching or variable writers): " + ", ".join(f"{i:#x}" for i in nolen) if nolen else "") + ".", ""]
@@ -286,10 +286,7 @@ def generate(sendsites):
         L += [f"## {title}", "", f"{len(rs)} ids.", "", "| Id | Class / writer | Length | S→C class | Senders | Notes |", "|---|---|---|---|---|---|"]
         for r in rs:
             cls = "<br>".join(f"`{c['vtable']}` / `{c['write']}`" for c in r["classes"]) or "inline"
-            if r["length"] is not None: ln = str(r["length"])
-            else:
-                fx = [c["fixed"] for c in r["classes"] if "fixed" in c]
-                ln = f"≥ {min(fx)}" if fx else ""
+            ln = str(r["length"]) if r["length"] is not None else "unknown"
             # a generic class (one u16, one u32, ...) is shared by many S→C ids: give the count only
             sc = "<br>".join(", ".join(c["s2c"]) if len(c["s2c"]) <= 3 else f"generic ({len(c['s2c'])} S→C ids)"
                              for c in r["classes"] if c["s2c"])

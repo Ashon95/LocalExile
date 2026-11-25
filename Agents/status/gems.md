@@ -9,6 +9,13 @@ Nothing yet.
 
 ## Partly working
 
+- Socketed gem kills emit incremental `0x00c3` XP when exact client math matches, falling back to `0x00bf` otherwise.
+- Icicle Mine variants release their radial or aimed volleys and scale with the detonation chain. Pyroclast
+  variants apply armed mine Fire Exposure, then release a nova and mortars. The Icicle critical aura is open.
+- Trap and mine payloads support Arc chains, Contagion, corpse Offerings, Hexes and Marks, damage brands,
+  Storm Call, Firestorm, Frost Bomb and Vortex. Offline checks exercise the paid placement and timed effects.
+- Eye of Winter variants emit their travel and final shards. Creeping Frost and its Floes variant release
+  chilling ground that follows enemies. The timings and ground motion were checked offline.
 - Ruthless gems use native primary/companion effect alternatives, requirements and skill rows.
   Deterministic support rewards are disabled; eligible active gems use Siosa's Uncarved Gemstone exchange.
   Gem XP receives the configured Ruthless multiplier.
@@ -66,12 +73,28 @@ Nothing yet.
 - **Linked support gems.** Native compatibility, link groups, duplicate families and skill-bar support records
   are implemented; Cyclone with Increased Area of Effect was read successfully by the real client.
   Ordinary hit, area, speed, critical, cost and reservation calculations use linked support stats.
-  Barrage's attack-time penalty uses resolved projectile quantity; sequential release and native validation remain open.
+  Barrage and Barrage of Volley Fire release ordered projectiles for direct attacks and Ballista Totem Support.
+  Offline coverage checks the individual contacts and cancellation between shots.
   Overcharge, Bloodthirst and four more supports scale hits by their more damage ([20](../docs/protocol/20-damage.md)).
+  Nightblade grants Elusive on a supported attack's critical strike. Its supported attacks gain base critical chance
+  during Elusive, and Nightblade's own Elusive adds a critical multiplier that decays with the buff.
+  The trap, mine and totem supports' own more or less damage scales the supported hit. Traps and mines take their
+  scoped critical multiplier. Herald passives apply to their secondary AoE and damage, and skill timing reads its
+  curse, mark, link and retaliation speed bonuses.
+  Retaliation hits apply their damage, stun and ailment duration modifiers.
+  A throw takes the trap or mine throwing time, held throws land, and a projectile spell leaves the trap or mine.
+  A rain skill (Rain of Arrows, Blast Rain, Toxic Rain) from a trap or mine comes down as the player's own does.
+  Several traps or mines scatter around the aim (the supports' circle, or a radius growing with their number), Swift
+  Assembly rolls its extra throws, and Charged Traps and Charged Mines grant charges, throwing speed and critical bonuses.
+  Flight and arming times and the native multi-throw patterns remain open.
   Item-granted supports join the same compatibility, duplicate resolution, calculations and native badge records
   for gems in their source item, independently of links; automated tests cover their addition and removal.
   Every third Ruthless-supported use is a Ruthless Blow ([25](../docs/protocol/25-gem-supports.md)).
+  Trinity and Unholy Trinity keep separate timed counters for eligible owner hits, with damage and resistance
+  bonuses from the lowest counter ([25](../docs/protocol/25-gem-supports.md)).
   Local socketed level/quality bonuses apply to physical gems, including support gems, without raising requirements.
+  Cast when Damage Taken checks its level cap against an equipment-granted skill's level; Varunastra fits one-hand
+  melee skill and support restrictions.
   Second Wind adds a stored use only to non-instant skills; ordinary cooldown charges recover sequentially on game time.
   The Delve socketed attack/spell more-damage effects reach the ordinary hit calculation.
   Hypothermia, Behead and Damage on Full Life scale the hits they apply to ([25](../docs/protocol/25-gem-supports.md)).
@@ -82,14 +105,21 @@ Nothing yet.
   and is consumed by a paid travel use; Block Chance Reduction lowers the monster's block roll and applies Overpowered;
   Machinations counts allocated keystones for its chaos gain and skill-local cost increase ([25](../docs/protocol/25-gem-supports.md)).
   Awakened supports' extra stats that have a consumer now apply: per-type supported gem levels, Brutality's Crush,
-  Spell Echo's double damage on the final repeat, and Generosity's aura effect with its "does not affect you".
+  Spell Echo's double damage on the final repeat, and Generosity's aura effect with its "does not affect you" (its buff
+  icon is no longer shown for a self-excluding aura, while the aura art and skill-bar association remain).
   Arrogance reserves its aura on life, Cruelty's hits grant its more damage over time buff, and Overheat consumes
   Fortification on use for more ailment damage ([25](../docs/protocol/25-gem-supports.md)).
   Multistrike repeats full swings within one paid use, cancels remaining repeats with the action, and keeps
   the native panel's per-hit damage convention; Melee Splash hits the enemies around each struck one
   ([25](../docs/protocol/25-gem-supports.md)).
-  Maim, Bloodlust, Pulverise, Rage, Power Charge on Critical, Volatility, Combustion, Item Quantity, Item Rarity,
+  Maim, Bloodlust for melee physical-origin damage, Pulverise, Rage, Power Charge on Critical, Volatility, Combustion, Item Quantity, Item Rarity,
   Iron Grip and Iron Will apply their stats as well ([25](../docs/protocol/25-gem-supports.md)).
+  Manaforged Arrows triggers off paid bow uses and channelled bow ticks and scales supported hit and ailment damage.
+  Cast when Stunned releases eligible linked spells from committed player stuns through the incoming-hit trigger queue
+  ([25](../docs/protocol/25-gem-supports.md)).
+  Intensify and Pinpoint gain Intensity on supported casts, lose it while moving or teleporting, and project their area
+  and projectile modifiers from the cast's starting stack count ([25](../docs/protocol/25-gem-supports.md)).
+  Momentum uses paid attacks or channel time, loses stacks on movement, and spends the cap on timed Swiftness.
   Immolate, Bloodthirst, Bonechill, Coursing Current, Fist of War, Sacrifice, Spellblade, Hallow and
   Excommunicate apply too. Devour recovers life/mana and consumes the killing blow's corpse. Sacrifice adds chaos
   damage at a valid spell release, including projectile hits and poison
@@ -107,7 +137,8 @@ Nothing yet.
   (`SpellRepeats`; [11](../docs/protocol/11-skills.md) "Spell repeats"); checked with the real client (2026-11-04).
   Unleash stores seals per linked spell and spends them on extra projectile, area and summon releases.
   Greater Spell Echo scales repeated area and projectile hits. Focused Channelling scales channelled area hits by elapsed whole seconds.
-  Meat Shield reduces damage taken by supported minions, and Elemental Army scales their elemental damage paths.
+  Meat Shield reduces damage taken by supported minions and lets targetable minions taunt on hit.
+  Elemental Army scales supported minions' elemental damage and applies Exposure on hit.
   Spell Cascade places its extra areas one effective radius apart in a line, and across the aim with Greater and
   Awakened `support_spell_cascade_sideways`, so the aimed centre still lands the main hit; captured from the 3.29.3b
   client (2026-11-04): Reap's five Awakened areas were 28-29 cells apart at a 28.5 effective radius.
@@ -116,10 +147,14 @@ Nothing yet.
   its up-cast there, then its landing at the target, with the skill's arrow art riding `aux_projectile_attach`,
   documented in [25](../docs/protocol/25-gem-supports.md).
   CWDT projectile spells execute; other trigger payloads refuse manual use ([25](../docs/protocol/25-gem-supports.md)).
+  Server-drawn gem projectiles (triggers, totems) play their impact clip, such as Fireball's explosion.
+  Cast on Melee Kill releases linked spells on a linked melee attack's kill; it is not yet checked in the client.
   Special execution mechanics remain incomplete; see [25](../docs/protocol/25-gem-supports.md).
 
-- **Culling Strike.** Melee, area and projectile hits cull at 10% Life; Cull the Weak culls normal and magic enemies at
-  its own share, and Pacifism's hits leave 1 Life ([25](../docs/protocol/25-gem-supports.md)).
+- **Culling Strike.** Melee, area and projectile hits cull at 10% Life; the target-state conditions (burning, frozen,
+  cursed, marked, poacher's-marked and under 10% Life) cull too, flat Life and Mana on cull are granted, Cull the Weak
+  culls normal and magic enemies at its own share, and Pacifism's hits leave 1 Life
+  ([25](../docs/protocol/25-gem-supports.md)).
 
 - **Stable gem skill ids (tested, not yet checked with the real client).** Each gem keeps its skill id while it stays
   socketed (a gem moved through the cursor keeps its own; a gem swapped in never takes the old gem's id), so skill bar
@@ -127,8 +162,14 @@ Nothing yet.
   one aura of a kind runs at a time (`GemSkillIds.cs`; [19](../docs/protocol/19-gems.md) §3).
 - **Gem levels (tested, level 1 → 2 checked with the real client).** A gem's level comes from its experience up to its
   experience type's cap; its skill uses that level's cost, damage, reservation and cooldown, and its quality stats;
-  transfigured and Trarthan gems grant their own skill; Vaal gems grant their Vaal skill and base skill.
-  Vaal soul collection/native budget payloads are implemented, pending native acceptance.
+  Transfigured and Trarthan gems grant their own skill.
+  Vaal gems grant their Vaal skill and base skill.
+  Effective levels include the gem's native tags, its host item's socketed bonuses and active equipment conditions.
+  Vaal soul collection/native budget payloads are implemented, pending native acceptance. Vaal Clarity spends souls
+  to grant a timed aura that removes mana costs for the caster and nearby allies while preserving other skill costs.
+  Vaal Rejuvenation Totem regenerates life and redirects part of nearby allies' hit damage into the totem's life.
+  Offline regressions cover Vaal Heavy Strike contact and knockback, Vaal Arctic Armour mitigation, Blazing Salvo
+  impacts and the three Spectral Shield Throw variants.
   Unsupported Vaal casts remain refused even with souls; see [27](../docs/protocol/27-vaal-souls.md).
   The variant is sent in the SkillGem data and saved.
   Item serialization also derives the native variant flag for standalone and socketed gems, preserving level-lock
@@ -140,6 +181,7 @@ Nothing yet.
   and its attribute requirements follow the client's own formula (`0x142476710`: `trunc((3 * level_req + 11) *
   (percent/100)^0.9 * k + 0.5)`, `k` 0.7 for a skill and 0.5 for a support, none below 14;
   fitted against 570 poedb tooltip cells with no mismatch: Haste 20 is 155 Dex, Clarity 20 119 Int, Fireball 20 155).
+  Any gem fits any gem socket; a matching red, green or blue socket adds 10% quality (client tutorial and reminder text).
   Socketing a gem the character is too low or too weak for is refused (0x30, `GemRequirementsUnmet`), and a gem its
   requirements above the character's makes its item inactive (the item's requirements are the highest of its own and its
   gems', `EquipmentStatSources`; lost in PR #175, restored 2026-10-29), as a worn item the character is too low for is: the

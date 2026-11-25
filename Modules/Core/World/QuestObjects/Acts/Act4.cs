@@ -47,6 +47,9 @@ static class Act4Objects
     public const string RoomFolder = "Metadata/Terrain/Mountain/Belly/Rooms/Unique/";
     public const string DeshretSpirit = "Metadata/QuestObjects/Act4/DeshretSpirit", DeshretHand = "Metadata/QuestObjects/Act4/DeshretHand";
     public const string RaptureDevice = "Metadata/QuestObjects/Act4/RaptureDevice";
+    public const string BeastSkinDoor = "Metadata/Terrain/Mountain/Mines/Objects/BeastSkinDoor",
+        BeastSkinDoorFX = "Metadata/Terrain/Mountain/Mines/Objects/BeastSkinDoorFX",
+        BeastSkinDoorExplosion = "Metadata/Terrain/Mountain/Mines/Objects/BeastSkinDoorExplosion";
     public const string ResonatorLever = "Metadata/Terrain/Act4/Area7/Objects/PortalDeviceLever",
         Resonator = "Metadata/Terrain/Act4/Area7/Objects/PortalDevice";   // ascent_summit_01.arm: a room room-points does not keep
 }
@@ -82,9 +85,9 @@ sealed class Act4 : Act
             // the Belly and stays as PietyBelly where she fell (no room places her; NPCTalk 620/621 start a4q5). In The
             // Harvest the three guardians' deaths set their Killed flags (assumed: no table names the setter). KillGuardians
             // (log rows 5-12, "kill the guardians") is not set: no data sets or clears it, and the "complete" rows 0 and 2
-            // need it missing (Act4Complete has none; ConsoleAscent keeps it). Malachai's second stage, which the area does
-            // not place (SecondForm), appears where the first falls; its death sets QuestComplete (the first stage cannot die
-            // below 70% in the game, a floor the server does not model: /kill ends it). The withered Dialla's 521 (its flag
+            // need it missing (Act4Complete has none; ConsoleAscent keeps it). Malachai retreats without dying at
+            // 70% life. His next form starts at 92% at the second arena's boss point and sets QuestComplete on death.
+            // The withered Dialla's 521 (its flag
             // DiallaOnMalachaiDead) opens the Ascent.
             new Quest("a4q1")
             {
@@ -94,6 +97,9 @@ sealed class Act4 : Act
                 On.Npc(CrystalVeins, Act4Npcs.DiallaRapture, null, transitionedBy: "a4q1-RaptureActivated"),
                 On.Near(CrystalVeins, Act4Npcs.DiallaRapture, "a4q1-SeenRaptureDialla"),
                 On.Object(CrystalVeins, Act4Objects.RaptureDevice, "a4q1-RaptureActivated"),
+                On.Object(CrystalVeins, Act4Objects.BeastSkinDoor, "a4q1-RaptureActivated"),
+                On.Object(CrystalVeins, Act4Objects.BeastSkinDoorFX, "a4q1-RaptureActivated"),
+                On.Object(CrystalVeins, Act4Objects.BeastSkinDoorExplosion, "a4q1-RaptureActivated"),
                 On.Exit(CrystalVeins, Belly1, "a4q1-DiallaOnTransformed"),
                 On.Seen(Belly2, Act4Monsters.PietyBeast, "a4q1-SeenPiety"),
                 On.Killed(Belly2, Act4Monsters.PietyBeast, "a4q1-KilledPiety"),
@@ -103,7 +109,8 @@ sealed class Act4 : Act
                 On.Killed(Harvest, Act4Monsters.Shavronne, "a4q1-KilledShavronne"),
                 On.Seen(Harvest, Act4Monsters.Malachai, "a4q1-SeenMalachai"),
                 On.Seen(Harvest, Act4Monsters.Malachai2, "a4q1-SeenMalachai"),
-                On.Forms(Harvest, [Act4Monsters.Malachai], Act4Monsters.Malachai2),
+                On.Threshold(Harvest, Act4Monsters.Malachai, 70),
+                On.Forms(Harvest, [Act4Monsters.Malachai], Act4Monsters.Malachai2, 92),
                 On.Killed(Harvest, Act4Monsters.Malachai2, "a4q1-QuestComplete"),
                 new PointPortalRule(Harvest, Highgate, "Metadata/QuestObjects/Act4/MalachaiDeathPortal"),
                 On.Exit(Harvest, Highgate, "a4q1-QuestComplete"),

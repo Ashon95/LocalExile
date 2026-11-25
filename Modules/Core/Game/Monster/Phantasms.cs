@@ -2,47 +2,80 @@ using GameServer.Core.Protocol.Instance;
 
 public static partial class Game
 {
-    static string SummonSupportStamp(SupportedGem gem) => string.Join(";", gem.Supports.Select(s =>
-        $"{s.Gem.Effect}:{s.Gem.Level}:{s.Gem.Quality}:{s.Gem.Socket}"));
+    const ushort PhantasmalMightBuff = 1472;
+
+    static bool PhantasmGrantsMight(Player player, GolemState.Golem fighter, double now, out double until)
+    {
+        until = 0;
+        return fighter.Definition.Kind == "Phantasm" && fighter.Monster.Life > 0 && !fighter.Monster.Dead
+            && player.Summons.Until.TryGetValue(fighter.Id, out until) && now < until;
+    }
+
+    static void PresentPhantasmalMightLocked(Player player, GolemState.Golem fighter,
+        IReadOnlyDictionary<uint, int> owner, double now)
+    {
+        if (fighter.Definition.Kind != "Phantasm") return;
+        if (GolemStat(owner, Stat.SummonedPhantasmsGrantBuff) <= 0 || !PhantasmGrantsMight(player, fighter, now, out _))
+        {
+            player.Area.Buffs.Clear(player.Id, PhantasmalMightBuff, fighter.Id);
+            return;
+        }
+        player.Area.Buffs.Keep(player.Id, new(PhantasmalMightBuff, fighter.Id, Values:
+        [
+            (uint)Math.Max(0, GolemStat(fighter.Own, Stat.PhantasmMinimumAddedPhysicalDamageToGrant)),
+            (uint)Math.Max(0, GolemStat(fighter.Own, Stat.PhantasmMaximumAddedPhysicalDamageToGrant))
+        ]));
+    }
+
+    static string SummonSupportStamp(SupportedGem gem, bool livingLightning = false)
+    {
+        var supports = livingLightning ? gem.Supports.Concat(gem.LivingLightningSupports) : gem.Supports;
+        return string.Join(";", supports.Select(s => $"{s.Gem.Effect}:{s.Gem.Level}:{s.Gem.Quality}:{s.Gem.Socket}"));
+    }
 
     static SummonCatalog.Definition PhantasmDefinition(string effect) => new(effect, "Phantasm",
-        "Metadata/Monsters/SummonedPhantasm/SummonedPhantasm", "base_number_of_support_ghosts_allowed", "");
+        "Metadata/Monsters/SummonedPhantasm/SummonedPhantasm", Stat.BaseNumberOfSupportGhostsAllowed, 0);
 
-    static SupportedGem PhantasmGem(ClientState conn, SupportedGem source)
+    static SupportedGem PhantasmGem(Player player, SupportedGem source)
     {
+        if (source.WornGrant is { } item && TriggeredItemMinion(item) == ItemSoulwrestPhantasm)
+            return source with { Stats = new Dictionary<uint, int>(source.Stats)
+            {
+                [Stat.BaseDisplayMinionActorLevel] = SkillsFor(player).PlayerLevelReq(source.Effect, source.Level),
+            } };
         var support = source.Supports.FirstOrDefault(s => s.Effect.Id == "SupportSummonPhantasm");
         var stats = new Dictionary<uint, int>(source.Stats);
-        void Set(string name, int value) { if (Stats.Key(name) is uint key) stats[key] = value; }
-        Set("base_skill_effect_duration", GolemStat(stats, "support_ghost_base_duration"));
-        Set("base_display_minion_actor_level", support is null ? 0 : SkillsFor(conn).PlayerLevelReq(support.Gem.Effect, support.Gem.Level));
+        void Set(uint name, int value) { if (name is var key) stats[key] = value; }
+        Set(Stat.BaseSkillEffectDuration, GolemStat(stats, Stat.SupportGhostBaseDuration));
+        Set(Stat.BaseDisplayMinionActorLevel, support is null ? 0 : SkillsFor(player).PlayerLevelReq(support.Gem.Effect, support.Gem.Level));
         return source with { Stats = stats };
     }
 
-    internal static void PhantasmsOnHitLocked(ClientState conn, SpawnedMonster victim, ushort source, double now,
+    internal static void PhantasmsOnHitLocked(Player player, SpawnedMonster victim, ushort source, double now,
         Random random, GolemState.Golem? minion = null, IReadOnlyDictionary<uint, int>? skill = null)
     {
-        if (source == 0 || conn.PlayerLife == 0 || !victim.Hostile || minion?.Definition.Kind == "Phantasm"
-            || minion?.Monster.Effects["cannot_spawn_support_ghosts"] > 0) return;
+        if (source == 0 || player.PlayerLife == 0 || !victim.Hostile || minion?.Definition.Kind == "Phantasm"
+            || minion?.Monster.Effects[Stat.CannotSpawnSupportGhosts] > 0) return;
         bool rareOrUnique = victim.Rarity is MonsterRarity.Rare or MonsterRarity.Unique;
         bool killed = victim.Dead || victim.Life == 0;
         if (!rareOrUnique && !killed) return;
         var knownStats = minion?.Own ?? skill;
         if (knownStats is not null
-            && (!rareOrUnique || GolemStat(knownStats, "chance_to_summon_support_ghost_on_hitting_rare_or_unique_%") <= 0)
-            && (!killed || GolemStat(knownStats, "chance_to_summon_support_ghost_on_killing_blow_%") <= 0)) return;
-        var gem = SupportedSkill(conn, source);
+            && (!rareOrUnique || GolemStat(knownStats, Stat.ChanceToSummonSupportGhostOnHittingRareOrUniquePct) <= 0)
+            && (!killed || GolemStat(knownStats, Stat.ChanceToSummonSupportGhostOnKillingBlowPct) <= 0)) return;
+        var gem = SupportedSkill(player, source);
         if (!gem.RequirementsMet || !gem.Supports.Any(s => s.Effect.Id == "SupportSummonPhantasm")) return;
-        var target = conn.Monsters.FirstOrDefault(p => ReferenceEquals(p.Value, victim));
+        var target = player.Area.Monsters.FirstOrDefault(p => ReferenceEquals(p.Value, victim));
         if (target.Value is null) return;
-        void Roll(string stat)
+        void Roll(uint stat)
         {
             int chance = GolemStat(gem.Stats, stat);
             if (chance > 0 && random.Next(100) < chance)
-                conn.Summons.HitSummons.Add(new(target.Key, victim, source, gem.Effect, gem.SourceGem, false,
+                player.Summons.HitSummons.Add(new(target.Key, victim, source, gem.Effect, gem.SourceGem, false,
                     "Phantasm", SummonSupportStamp(gem)));
         }
         if (rareOrUnique)
-            Roll("chance_to_summon_support_ghost_on_hitting_rare_or_unique_%");
-        if (killed) Roll("chance_to_summon_support_ghost_on_killing_blow_%");
+            Roll(Stat.ChanceToSummonSupportGhostOnHittingRareOrUniquePct);
+        if (killed) Roll(Stat.ChanceToSummonSupportGhostOnKillingBlowPct);
     }
 }

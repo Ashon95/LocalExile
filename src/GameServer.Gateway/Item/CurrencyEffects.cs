@@ -32,8 +32,8 @@ public static class CurrencyEffects
     public const string EldritchChaosOrb = "Metadata/Items/Currency/CurrencyEldritchRerollRare";
     public const string EldritchExaltedOrb = "Metadata/Items/Currency/CurrencyEldritchAddModToRare";
 
-    /// <summary>Orb of Unmaking (CurrencyItems Action atlas_skill_point_respec): used from the bag (C→S 0x58), it refunds
-    /// Atlas passive points. See Game.UseItem, the local rule is there.</summary>
+    /// <summary>Orb of Unmaking (CurrencyItems Action atlas_skill_point_respec): used from the bag (C→S 0x58), it grants
+    /// one Atlas passive respec point (Game.UseOrbOfUnmaking).</summary>
     public const string OrbOfUnmaking = "Metadata/Items/Currency/CurrencyAtlasPassiveRefund";
 
     /// <summary>Eldritch Chaos Orb, the documented LocalExile rule: a Chaos Orb (all unprotected explicit affixes
@@ -55,6 +55,13 @@ public static class CurrencyEffects
     /// stays. An item without one is refused before the orb is spent.</summary>
     public static Item? EldritchAnnulment(Item item, ItemRolls rolls, Random random) =>
         rolls.HasEldritchImplicit(item) ? rolls.Annul(item, random) : null;
+
+    public const string OrbOfConflict = "Metadata/Items/Currency/CurrencyConflictOrb";
+
+    /// <summary>Orb of Conflict (CurrencyItems row 1204, Action conflict_orb): a non-unique item with both Eldritch
+    /// implicits has one raised a tier and the other lowered a tier; see ItemRolls.Conflict for the admission and
+    /// the local weighting. An item without both implicits, or with no valid move, is refused before the orb is spent.</summary>
+    public static Item? Conflict(Item item, ItemRolls rolls, Random random) => rolls.Conflict(item, random);
 
     public const string OrbOfBinding = "Metadata/Items/Currency/CurrencyUpgradeToRareAndSetSockets";
 
@@ -80,12 +87,13 @@ public static class CurrencyEffects
     public const string TaintedJewellersOrb = "Metadata/Items/Currency/CurrencyHellscapeRerollSocketNumbers";
     public const string TaintedArmourersScrap = "Metadata/Items/Currency/CurrencyHellscapeArmourQuality";
     public const string TaintedBlacksmithsWhetstone = "Metadata/Items/Currency/CurrencyHellscapeWeaponQuality";
+    public const string TaintedCatalyst = "Metadata/Items/Currency/CurrencyJewelleryQualityVaal";
 
     /// <summary>The Tainted (Scourge) currencies this class applies: the ordinary effect, but only on a corrupted item.</summary>
     public static readonly IReadOnlySet<string> TaintedIds = new HashSet<string>
     {
         TaintedChaosOrb, TaintedExaltedOrb, TaintedChromaticOrb, TaintedOrbOfFusing, TaintedJewellersOrb,
-        TaintedArmourersScrap, TaintedBlacksmithsWhetstone,
+        TaintedArmourersScrap, TaintedBlacksmithsWhetstone, TaintedCatalyst,
     };
 
     /// <summary>Tainted currency (the client's CurrencyItems descriptions): only on a corrupted item, which stays
@@ -110,6 +118,7 @@ public static class CurrencyEffects
             TaintedJewellersOrb => TaintedJewellers(plain, type, random),
             TaintedArmourersScrap => RandomQuality(plain, "Armour", random),
             TaintedBlacksmithsWhetstone => RandomQuality(plain, "Weapon", random),
+            TaintedCatalyst => RandomJewelleryQuality(plain, type, Program.Items.JewelleryCatalystTypes, random),
             _ => null,
         };
         return result is { } changed ? changed with { Corrupted = true } : null;
@@ -187,7 +196,7 @@ public static class CurrencyEffects
         int count = item.Sockets.Count, capacity = SocketCapacity(item, type);
         if (capacity == 0 || count > capacity || item.Sockets.Any(s => s.Gem is not null)) return null;
         if (item.Sockets.Any(s => s.Colour == SocketColour.Abyss)
-            && ItemModStats.Local(item, Program.Items.Mods).ContainsKey("local_cannot_have_non_abyssal_sockets")) return null;
+            && ItemModStats.Local(item, Program.Items.Mods).ContainsKey(Stat.LocalCannotHaveNonAbyssalSockets)) return null;
         int last = -1;
         for (int i = 0; i < count; i++) if (item.Sockets[i].Colour != SocketColour.Abyss) last = i;
         bool canAdd = count < MaximumSockets(item, type), canRemove = count > 1 && last >= 0;
@@ -311,13 +320,16 @@ public static class CurrencyEffects
     public static bool HandlesAction(string? action) =>
         action is { Length: > 0 } && (action.StartsWith("add_cleansing_fire_implicit_", StringComparison.Ordinal)
             || action.StartsWith("add_great_tangle_implicit_", StringComparison.Ordinal)
-            || action is "add_map_alt_quality" or "add_armour_quality" or "add_weapon_quality" or "add_flask_quality"
+            || action is "add_map_alt_quality" or "add_jewellery_quality" or "add_random_jewellery_quality"
+                or "add_armour_quality" or "add_weapon_quality" or "add_flask_quality"
                 or "add_gem_quality" or "corrupt_item" or "special_corrupt_item"
                 or "identify" or "reroll" or "transmute_to_magic" or "transmute_to_rare" or "transmute_to_random"
                 or "add_mod_to_magic" or "reroll_magic" or "convert_to_normal" or "add_mod_to_rare"
                 or "upgrade_magic_to_rare" or "reroll_socket_colours" or "reroll_socket_links" or "reroll_socket_numbers"
                 or "reroll_mod_values" or "reroll_implicit_mod" or "reroll_variable_defences"
-                or "remove_random_mod" or "fracture_random_mod" or "add_flask_seal" or "add_flask_injector");
+                or "remove_random_mod" or "fracture_random_mod" or "add_flask_seal" or "add_flask_injector"
+                or "conflict_orb" or "reroll_rare_eldritch" or "add_mod_to_rare_eldritch"
+                or "remove_random_mod_eldritch");
 
     public static bool Recognizes(ItemCatalog items, ItemCatalog.BaseType type, bool essence = false) =>
         essence || HandlesAction(items.CurrencyAction(type))
@@ -325,10 +337,10 @@ public static class CurrencyEffects
             or OrbOfAlchemy or ChaosOrb or DivineOrb or BlessedOrb or OrbOfScouring or OrbOfTransmutation
             or OrbOfAlteration or OrbOfAugmentation or RegalOrb or ExaltedOrb or OrbOfAnnulment or AncientOrb
             or ArmourersScrap or SacredOrb or BlacksmithsWhetstone or OrbOfChance or VaalOrb or GlassblowersBauble
-            or GemcuttersPrism or FracturingOrb or CartographersChisel or EldritchChaosOrb or EldritchExaltedOrb
-            or EldritchAnnulmentOrb or OrbOfBinding or OrbOfUnmaking
+            or GemcuttersPrism or FacetorsLens or FracturingOrb or CartographersChisel or EldritchChaosOrb or EldritchExaltedOrb
+            or EldritchAnnulmentOrb or OrbOfBinding or OrbOfUnmaking or OrbOfConflict
             or TaintedChaosOrb or TaintedExaltedOrb or TaintedChromaticOrb or TaintedOrbOfFusing or TaintedJewellersOrb
-            or TaintedArmourersScrap or TaintedBlacksmithsWhetstone
+            or TaintedArmourersScrap or TaintedBlacksmithsWhetstone or TaintedCatalyst
             or LesserEldritchIchor or GreaterEldritchIchor or GrandEldritchIchor or ExceptionalEldritchIchor
             or LesserEldritchEmber or GreaterEldritchEmber or GrandEldritchEmber or ExceptionalEldritchEmber
             or FlaskEnchantments.Enkindling or FlaskEnchantments.Instilling;
@@ -350,6 +362,10 @@ public static class CurrencyEffects
             "identify" => target.Identified || !target.Components.Contains("Mods") ? null : target with { Identified = true },
             "add_map_alt_quality" => targetType is not null && items.AlternateQualityOf(currency) is byte qualityType
                 ? Chisel(target, targetType, qualityType) : null,
+            "add_jewellery_quality" => targetType is not null && items.AlternateQualityOf(currency) is byte catalystType
+                ? Catalyst(target, targetType, catalystType) : null,
+            "add_random_jewellery_quality" => targetType is not null && target.Corrupted && !target.Mirrored
+                ? RandomJewelleryQuality(target, targetType, items.JewelleryCatalystTypes, random) : null,
             "add_armour_quality" => ArmourerScrap(target, random),
             "add_weapon_quality" => Whetstone(target, random),
             "add_flask_quality" => Glassblower(target, random),
@@ -374,6 +390,10 @@ public static class CurrencyEffects
             "reroll_variable_defences" => targetType is not null
                 ? Sacred(target, items.Defences(targetType), random) : null,
             "remove_random_mod" => Annulment(target, rolls, random),
+            "conflict_orb" => Conflict(target, rolls, random),
+            "reroll_rare_eldritch" => EldritchChaos(target, rolls, random),
+            "add_mod_to_rare_eldritch" => EldritchExalted(target, rolls, random),
+            "remove_random_mod_eldritch" => EldritchAnnulment(target, rolls, random),
             "fracture_random_mod" => Fracture(target, rolls, random),
             "add_flask_seal" or "add_flask_injector" => targetType is not null
                 ? FlaskEnchantments.Apply(target, targetType, items.Mods, action == "add_flask_injector", random) : null,
@@ -407,10 +427,46 @@ public static class CurrencyEffects
             AlternateQualityType = qualityType,
         };
 
+    /// <summary>Whether the base type is jewellery (ring, amulet or belt) that accepts Catalysts.</summary>
+    public static bool IsJewellery(ItemCatalog.BaseType type) =>
+        type.Class is "Ring" or "Amulet" or "Belt";
+
+    /// <summary>Any jewellery Catalyst (CurrencyItems Action add_jewellery_quality): adds 5% quality to normal,
+    /// 2% to magic, and 1% to rare/unique rings, amulets and belts, up to 20%. Switching to a different catalyst type
+    /// replaces the old quality type and starts from the new gain. Refused on corrupted/mirrored/non-jewellery items,
+    /// or when already at 20% of the same catalyst type.</summary>
+    public static Item? Catalyst(Item item, ItemCatalog.BaseType type, byte qualityType)
+    {
+        if (!IsJewellery(type) || !item.Components.Contains("Mods") || item.Corrupted || item.Mirrored) return null;
+        if (item.AlternateQualityType == qualityType && item.Quality >= MaximumQuality) return null;
+        int gain = item.Rarity switch
+        {
+            ItemRarity.Normal => 5,
+            ItemRarity.Magic => 2,
+            _ => 1,
+        };
+        int start = item.AlternateQualityType == qualityType ? item.Quality : 0;
+        return item with
+        {
+            Quality = (byte)Math.Min(MaximumQuality, start + gain),
+            AlternateQualityType = qualityType,
+        };
+    }
+
+    /// <summary>Tainted Catalyst (add_random_jewellery_quality): applies a random catalyst quality type and random
+    /// quality (1-20%) to a corrupted ring, amulet or belt.</summary>
+    public static Item? RandomJewelleryQuality(Item item, ItemCatalog.BaseType type, IReadOnlyList<byte> catalystTypes, Random random) =>
+        !IsJewellery(type) || !item.Components.Contains("Mods") || item.Mirrored || catalystTypes.Count == 0 ? null
+            : item with
+            {
+                AlternateQualityType = catalystTypes[random.Next(catalystTypes.Count)],
+                Quality = (byte)random.Next(1, MaximumQuality + 1),
+            };
+
     public const string GlassblowersBauble = "Metadata/Items/Currency/CurrencyFlaskQuality";
 
     public static Item? Glassblower(Item item, Random? random = null) =>
-        AddQuality(item, "Flask", QualityGain(item, random ?? Random.Shared));
+        AddQuality(item, item.Components.Contains("Tincture") ? "Tincture" : "Flask", QualityGain(item, random ?? Random.Shared));
 
     public const string FracturingOrb = "Metadata/Items/Currency/CurrencyFractureRare";
 
@@ -437,6 +493,20 @@ public static class CurrencyEffects
     public static Item? Gemcutter(Item item) =>
         !item.Components.Contains("SkillGem") || !item.Components.Contains("Quality") || item.Corrupted || item.Quality >= MaximumQuality ? null
             : item with { Quality = (byte)(item.Quality + 1) };
+
+    public const string FacetorsLens = "Metadata/Items/Currency/CurrencyAddGemExperience";
+
+    /// <summary>Facetor's Lens: adds its stored experience (<paramref name="storedExperience"/>) to a non-corrupted,
+    /// non-mirrored skill gem that has not yet reached its maximum level experience cap.</summary>
+    public static Item? ApplyFacetorsLens(Item target, ItemCatalog.GemType? gem, int storedExperience)
+    {
+        if (storedExperience <= 0 || gem is null || !target.Components.Contains("SkillGem") || target.Corrupted || target.Mirrored)
+            return null;
+        int maxXp = gem.ExperienceFor(gem.MaxLevel);
+        if (maxXp <= 0 || target.GemExperience < 0 || target.GemExperience >= maxXp) return null;
+        long next = Math.Min((long)maxXp, (long)target.GemExperience + storedExperience);
+        return target with { GemExperience = (int)next };
+    }
 
     public const string OrbOfChance = "Metadata/Items/Currency/CurrencyUpgradeRandomly";
 
@@ -490,8 +560,15 @@ public static class CurrencyEffects
             layouts.Add(layout);
             sizes[layout.Max()]++;
         }
+        double qualityBonus = 1.0 + item.Quality / 100.0;
+        int boostedMinLink = Math.Min(count, 5);
         var choices = layouts.Where(g => !g.SequenceEqual(old)).Select(g =>
-            (Links: g, Weight: weights[g.Max()] / sizes[g.Max()] * Math.Pow(1 + item.Quality / 100.0, g.Max() - 1))).ToArray();
+        {
+            byte largest = g.Max();
+            double weight = weights[largest] / sizes[largest];
+            if (largest >= boostedMinLink) weight *= qualityBonus;
+            return (Links: g, Weight: weight);
+        }).ToArray();
         if (choices.Length == 0) return null;
         double roll = random.NextDouble() * choices.Sum(c => c.Weight);
         foreach (var choice in choices)
@@ -502,11 +579,10 @@ public static class CurrencyEffects
         return item with { Links = choices[^1].Links };
     }
 
-    // Initial local rules: 1, 2, 3, 4 or 6 sockets (five deliberately excluded).
-    // Weights and link chances are approximations, not recovered client/server constants.
+    // Retail item-level socket caps: 2 at ilvl 1, 3 at ilvl 2+, 4 at ilvl 25+, 5 at ilvl 35+, 6 at ilvl 50+.
     public static int MaximumSockets(Item item, ItemCatalog.BaseType type)
     {
-        int levelLimit = item.ItemLevel >= 50 ? 6 : item.ItemLevel >= 25 ? 4 : item.ItemLevel >= 2 ? 3 : 2;
+        int levelLimit = item.ItemLevel >= 50 ? 6 : item.ItemLevel >= 35 ? 5 : item.ItemLevel >= 25 ? 4 : item.ItemLevel >= 2 ? 3 : 2;
         return Math.Min(SocketCapacity(item, type), levelLimit);
     }
 
@@ -524,30 +600,32 @@ public static class CurrencyEffects
     {
         int max = MaximumSockets(item, type);
         if (max == 0 || item.Sockets.Count >= SocketCapacity(item, type) || item.Sockets.Any(s => s.Gem is not null)) return null;
-        (int Count, int Weight)[] choices = [(1, 50), (2, 120), (3, 100), (4, 30), (6, 1)];
+        double qualityBonus = 1.0 + item.Quality / 100.0;
+        int boostedMinSockets = Math.Min(max, 5);
+        (int Count, double Weight)[] choices = [(1, 50), (2, 120), (3, 100), (4, 30), (5, 5), (6, 1)];
         var abyss = item.Sockets.Where(s => s.Colour == SocketColour.Abyss).ToArray();
-        if (abyss.Length > 0 && ItemModStats.Local(item, Program.Items.Mods).ContainsKey("local_cannot_have_non_abyssal_sockets"))
+        if (abyss.Length > 0 && ItemModStats.Local(item, Program.Items.Mods).ContainsKey(Stat.LocalCannotHaveNonAbyssalSockets))
             return null;
         var ordinary = item.Sockets.Where(s => s.Colour != SocketColour.Abyss).ToArray();
-        var allowed = choices.Where(c => c.Count >= abyss.Length && c.Count <= max && c.Count != item.Sockets.Count).ToArray();
+        var allowed = choices.Where(c => c.Count >= abyss.Length && c.Count <= max && c.Count != item.Sockets.Count)
+            .Select(c => (c.Count, Weight: c.Count >= boostedMinSockets ? c.Weight * qualityBonus : c.Weight)).ToArray();
         if (allowed.Length == 0) return null;
-        int roll = random.Next(allowed.Sum(c => c.Weight));
-        int count = allowed[0].Count;
+        double roll = random.NextDouble() * allowed.Sum(c => c.Weight);
+        int count = allowed[^1].Count;
         foreach (var choice in allowed)
         {
             if (roll < choice.Weight) { count = choice.Count; break; }
             roll -= choice.Weight;
         }
-        var sockets = new List<ItemSocket>();
-        var links = new List<byte> { 1 };
+        int ordinaryCount = count - abyss.Length;
+        var sockets = new List<ItemSocket>(count);
         for (int i = 0; i < count; i++)
         {
-            bool isAbyss = i >= count - abyss.Length;
-            sockets.Add(isAbyss ? abyss[i - (count - abyss.Length)] : i < ordinary.Length ? ordinary[i] : new(SocketColour.White));
-            if (i == 0) continue;
-            if (!isAbyss && random.Next(2) == 0) links[^1]++;
-            else links.Add(1);
+            bool isAbyss = i >= ordinaryCount;
+            sockets.Add(isAbyss ? abyss[i - ordinaryCount] : i < ordinary.Length ? ordinary[i] : new(SocketColour.White));
         }
+        var links = new List<byte>(ItemCatalog.RollSocketLinks(ordinaryCount, random));
+        for (int i = 0; i < abyss.Length; i++) links.Add(1);
         return item with { Sockets = sockets, Links = links };
     }
 

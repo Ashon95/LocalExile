@@ -41,9 +41,13 @@ public static class Flasks
     /// f32 in seconds (+0x68, reader 0x141fe6090; without it +infinity), and the flask-bar cell as the source skill (+0x60):
     /// the client draws the effect's draining timer bar under that flask (live 2026-10-25). <paramref name="values"/>: the
     /// IsRecovery rows' one u32 per GrantedStats entry.</summary>
-    public static byte[] Buff(uint player, ushort buff, ushort row, byte slot, double? seconds, IReadOnlyList<uint>? values = null) =>
-        InstanceEntities.AddBuff(player, buff, row, player, slot, values,
-            u68: seconds is double s ? BitConverter.SingleToUInt32Bits((float)s) : null);
+    /// Two effects of one row run side by side (two Life flasks): each is its own buff (<paramref name="tag"/>: its number).
+    public static Buff Buff(uint player, ushort tag, ushort row, byte slot, double? seconds, IReadOnlyList<uint>? values = null) =>
+        Buff(player, tag, row, slot, seconds, values, null);
+
+    public static Buff Buff(uint player, ushort tag, ushort row, byte slot, double? seconds, IReadOnlyList<uint>? values,
+        ushort? visual) =>
+        new(row, player, slot, values, U68: seconds is double s ? global::Buff.Seconds(s) : null, Visual: visual, Tag: tag);
 
     /// <summary>A hybrid's Life and Mana recover and end independently (wiki Hybrid flask; PoB CalcPerform).
     /// Give each resource its own existing recovery queue, native buff and remaining duration. Its companion continues
@@ -73,6 +77,7 @@ public static class Flasks
     {
         // An accepted recipient snapshot, independent of the Game assembly that admitted the paid use.
         public bool CopyManaToLife { get; set; }
+        public bool RestoresMana => ManaPerSecond > 0 || ManaAtEnd > 0;
 
         /// <summary>Whether a full pool ends it: a life effect when life is full, a mana one when mana is (a hybrid one when
         /// both are), unless it stays at full.</summary>
@@ -110,17 +115,54 @@ public static class Flasks
             get { lock (_lock) return _running.Count > 0; }
         }
 
-        /// <summary>Starts an effect: it recovers at once, or waits in its queue. Nothing is replaced (null).</summary>
-        public Effect? Start(Effect effect)
+        /// <summary>Whether a running recovery effect restores mana, including a hybrid or a queued flask.</summary>
+        public bool AnyMana
         {
-            lock (_lock) _running.Add(new Running(effect));
-            return null;
+            get { lock (_lock) return AnyManaLocked(); }
         }
+
+        bool AnyManaLocked() => _running.Any(r => r.Remaining > Done && r.Effect.RestoresMana);
+
+        /// <summary><see cref="Any"/> or <see cref="AnyMana"/> changed. Called outside the lock.</summary>
+        public Action? AnyChanged;
+
+        T Changing<T>(Func<T> change)
+        {
+            bool changed;
+            T result;
+            lock (_lock)
+            {
+                bool before = _running.Count > 0, hadMana = AnyManaLocked();
+                result = change();
+                changed = before != (_running.Count > 0) || hadMana != AnyManaLocked();
+            }
+            if (changed) AnyChanged?.Invoke();
+            return result;
+        }
+
+        /// <summary>Starts an effect: it recovers at once, or waits in its queue. Nothing is replaced (null).</summary>
+        public Effect? Start(Effect effect) => Changing<Effect?>(() =>
+        {
+            _running.Add(new Running(effect));
+            return null;
+        });
 
         /// <summary>The seconds of recovery an effect has left (0 when it is not running).</summary>
         public double Remaining(Effect effect)
         {
             lock (_lock) return _running.FirstOrDefault(r => ReferenceEquals(r.Effect, effect))?.Remaining ?? 0;
+        }
+
+        /// <summary>The earliest instant at which a running recovery effect can finish, or null when none are running.</summary>
+        public double? NextExpiry(double now)
+        {
+            lock (_lock)
+            {
+                double next = double.PositiveInfinity;
+                foreach (var r in _running)
+                    if (r.Remaining > Done) next = Math.Min(next, now + r.Remaining);
+                return double.IsFinite(next) ? next : null;
+            }
         }
 
         /// <summary>The life and mana recovered between <paramref name="from"/> and <paramref name="to"/>, and the effects
@@ -141,7 +183,7 @@ public static class Flasks
                 _running.Remove(r);
                 ended.Add(r.Effect);
             }
-            lock (_lock)
+            return Changing(() =>
             {
                 foreach (var r in _running.Where(r => r.Effect.Queue == 0).ToList())
                     Run(r, Math.Min(r.Remaining, Math.Max(0, to - Math.Max(from, r.Effect.Started))));
@@ -163,8 +205,8 @@ public static class Flasks
                         Run(first, seconds);
                         t += seconds;
                     }
-            }
-            return (life, mana, ended);
+                return (life, mana, ended);
+            });
         }
 
         /// <summary>Of the effects a full pool ended (<paramref name="ended"/>, from <see cref="End"/>), the ones that stay at
@@ -172,26 +214,26 @@ public static class Flasks
         /// the rest, which end. (<paramref name="now"/>: unused, the time left decides.)</summary>
         public List<Effect> KeepRunning(List<Effect> ended, bool lifeFull, bool manaFull, double now)
         {
-            lock (_lock)
+            return Changing(() =>
             {
                 var back = _lastEnded.Where(r => r.Remaining > Done && !r.Effect.EndsWhenFull(lifeFull, manaFull)
                     && ended.Any(e => ReferenceEquals(e, r.Effect)) && !_running.Contains(r)).ToList();
                 _running.AddRange(back);
-                return [.. ended.Where(e => !back.Any(r => ReferenceEquals(r.Effect, e)))];
-            }
+                return (List<Effect>)[.. ended.Where(e => !back.Any(r => ReferenceEquals(r.Effect, e)))];
+            });
         }
 
         /// <summary>Ends the effects <paramref name="which"/> picks (a full pool, death): them, removed.</summary>
         public List<Effect> End(Func<Effect, bool> which)
         {
-            lock (_lock)
+            return Changing(() =>
             {
                 var ended = _running.Where(r => which(r.Effect)).ToList();
                 foreach (var r in ended) _running.Remove(r);
                 _lastEnded.Clear();
                 _lastEnded.AddRange(ended);
-                return [.. ended.Select(r => r.Effect)];
-            }
+                return (List<Effect>)[.. ended.Select(r => r.Effect)];
+            });
         }
     }
 }

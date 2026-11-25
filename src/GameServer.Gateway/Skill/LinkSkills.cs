@@ -34,9 +34,11 @@ public sealed class LinkSkills
         public uint Target => target;
         public ushort SkillId => skillId;
         public string EffectId => effectId;
+        public IReadOnlyDictionary<uint, int> SkillStats { get; init; } = new Dictionary<uint, int>();
         public double Until;
-        public double ManaPerMinute;
-        public ushort SourceBuff, TargetBuff;
+        public double ManaPerMinute, LifePerMinute, LifeCarry, LifePaidAt;
+        // Its two buffs' rows, and the tags that tell this link's apart (Buff.Tag).
+        public ushort SourceBuff, TargetBuff, SourceRow, TargetRow;
         public double? AwaySince;
     }
 
@@ -49,7 +51,8 @@ public sealed class LinkSkills
 
     /// <summary>A flask effect on a linked target (Field Medicine): the target, its buff instances (the flask's, and the
     /// Silver Flask's Onslaught), when it ends and the stats it applies there.</summary>
-    public sealed record FlaskOn(uint Target, ushort Buff, ushort? Extra, double Until, IReadOnlyList<UtilityFlasks.Source> Stats);
+    public sealed record FlaskOn(uint Target, ushort Buff, ushort? Extra, double Until, IReadOnlyList<UtilityFlasks.Source> Stats,
+        ushort Row = 0, ushort ExtraRow = 0);
 
     public readonly List<FlaskOn> Flasks = [];
 
@@ -57,8 +60,8 @@ public sealed class LinkSkills
     public double PaidAt, ManaCarry;
 }
 
-public sealed partial class ClientState
+public sealed partial class Player
 {
-    /// <summary>The player's links (LinkSkills), under the Monsters lock.</summary>
+    /// <summary>The player's links (LinkSkills), in the area's frame.</summary>
     public readonly LinkSkills Links = new();
 }

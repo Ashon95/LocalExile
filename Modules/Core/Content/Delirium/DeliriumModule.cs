@@ -11,7 +11,7 @@ public sealed partial class DeliriumModule : IModule
 {
     const string StateKey = "Delirium.Simulacrum";
     readonly ConditionalWeakTable<InstanceState, Run> runs = new();
-    readonly ConditionalWeakTable<ClientState, View> views = new();
+    readonly ConditionalWeakTable<Player, View> views = new();
     readonly JsonSerializerOptions serialization = new() { TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver() };
     IModuleContext context = null!;
 
@@ -31,21 +31,46 @@ public sealed partial class DeliriumModule : IModule
         public int KosisCount { get; set; }
         public bool OmniThisWave { get; set; }
         public bool KosisThisWave { get; set; }
+        public bool OmniSpawnedThisWave { get; set; }
+        public bool KosisSpawnedThisWave { get; set; }
         public double Started { get; set; }
         public double NextSpawnAt { get; set; }
         public int VisualVersion { get; set; }
         public HashSet<uint> Monsters { get; set; } = [];
         public int[] Rewards { get; set; } = [];
+        /// <summary>Per reward type, parallel to <see cref="Rewards"/>: the kill points towards its next cycle, and
+        /// how many cycles it completed this wave. A filled bar counts one reward; the wave pays them all when it ends.</summary>
+        public int[] RewardPoints { get; set; } = [];
+        public int[] RewardCounts { get; set; } = [];
+        /// <summary>Sizes the per-type arrays to the wave's types (a save from before they existed has none).</summary>
+        public void SizeRewards()
+        {
+            if (RewardPoints.Length != Rewards.Length) RewardPoints = new int[Rewards.Length];
+            if (RewardCounts.Length != Rewards.Length) RewardCounts = new int[Rewards.Length];
+        }
+        /// <summary>The wave's reward types as the initiator's ObjectMagicProperties mods (AfflictionMapReward1..9,
+        /// one value per type).</summary>
+        public ItemMod[] RewardMods { get; set; } = [];
         public Dictionary<string, int> Modifiers { get; set; } = new(StringComparer.Ordinal);
         public string[] ModifierNames { get; set; } = [];
         public ItemMod[] Affixes { get; set; } = [];
         public Run? Next { get; set; }
         [System.Text.Json.Serialization.JsonIgnore] public bool Busy;
+        [System.Text.Json.Serialization.JsonIgnore] public byte[]? LastTiles;
         /// <summary>The wave's monster objects by id, while this module generation runs: a kill whose corpse the
         /// killing blow consumed (an explosion, Devour) has already left conn.Monsters when the kill handlers run, so
         /// it is matched here, and Step counts one that died out of the list.</summary>
         [System.Text.Json.Serialization.JsonIgnore] public Dictionary<uint, SpawnedMonster> Bodies { get; } = [];
-        [System.Text.Json.Serialization.JsonIgnore] public bool SpawningDone => ProgressGoal > 0 ? SpawnPoints >= ProgressGoal : Spawned >= Budget;
+        const int OmniSpawnAt = 20, KosisSpawnAt = 40;
+        // In existing saved waves a passed spawn ordinal already accounts for the corresponding boss.
+        bool OmniPending => OmniThisWave && !OmniSpawnedThisWave && Spawned <= OmniSpawnAt;
+        bool KosisPending => KosisThisWave && !KosisSpawnedThisWave && Spawned <= KosisSpawnAt;
+        bool SpawnBudgetSpent => ProgressGoal > 0 ? SpawnPoints >= ProgressGoal : Spawned >= Budget;
+        [System.Text.Json.Serialization.JsonIgnore] public bool SpawningDone => SpawnBudgetSpent && !OmniPending && !KosisPending;
+        public string? DueBoss() => OmniPending && (Spawned == OmniSpawnAt || SpawnBudgetSpent) ? SimulacrumRules.Omniphobia
+            : KosisPending && (Spawned == KosisSpawnAt || SpawnBudgetSpent) ? SimulacrumRules.Kosis : null;
+        public bool CanSpawnDueBoss(double now, int activeLimit) =>
+            Active && now >= NextSpawnAt && Monsters.Count < activeLimit && DueBoss() is not null;
         public int SpawnAllowance(double now, int packSize, int activeLimit) => !Active || now < NextSpawnAt ? 0
             : Math.Max(0, Math.Min(Math.Min(packSize, ProgressGoal > 0 ? ProgressGoal - SpawnPoints : Budget - Spawned), activeLimit - Monsters.Count));
         public bool RecordKill(uint id)
@@ -53,7 +78,18 @@ public sealed partial class DeliriumModule : IModule
             Bodies.Remove(id);
             if (!Monsters.Remove(id)) return false;
             Kills++;
-            if (MonsterPoints.Remove(id, out int points)) KillPoints += points;
+            if (!MonsterPoints.Remove(id, out int points)) return true;
+            KillPoints += points;
+            SizeRewards();
+            // Every type's bar advances by the same kill points and fills at its own goal, so the common types pay
+            // more often than the rare ones. The wave pays what the bars counted when it is over.
+            for (int i = 0; i < Rewards.Length; i++)
+            {
+                int goal = RewardGoal(this, i), total = RewardPoints[i] + points;
+                int paid = total / goal;
+                RewardPoints[i] = total - paid * goal;
+                if (paid > 0) RewardCounts[i] += paid;
+            }
             return true;
         }
         public bool TryComplete()
@@ -66,162 +102,207 @@ public sealed partial class DeliriumModule : IModule
     sealed class View { public uint Entity, Stash; public (int X, int Y) At; public bool Native, Repairing; }
     sealed class Cleanup(Action clean) : IDisposable { public void Dispose() => clean(); }
 
+    public static void LoadData() => AfflictionRuleset.LoadGameData();
+
     public void Load(IModuleContext module)
     {
+        LoadData();
         context = module;
         module.Lifetime.Own(new Cleanup(() => { runs.Clear(); views.Clear(); }));
-        GameEvents.MapOpening.Add(module.Manifest.Id, request => SimulacrumRules.Resolve(request, Random.Shared));
-        GameEvents.AreaHeader.Add(module.Manifest.Id, conn => SimulacrumRules.IsArena(conn.Layout.Id)
-            ? new AreaHeader(null, null) { Level = (byte)SimulacrumRules.Level(State(conn).Wave == 0 ? 1 : State(conn).Wave) } : null);
-        GameEvents.AreaGenerated.Add(module.Manifest.Id, Enter);
-        GameEvents.PlayerLeaving.Add(module.Manifest.Id, (conn, why) =>
+        GameEvents.MapOpening.Add(module.Manifest.Id, request => SimulacrumRules.Resolve(request, global::Game.AreaRng(request.Player)));
+        GameEvents.AreaHeader.Add(module.Manifest.Id, player => SimulacrumRules.IsArena(player.Layout.Id)
+            ? new AreaHeader(null, null) { Level = (byte)SimulacrumRules.Level(State(player).Wave == 0 ? 1 : State(player).Wave) } : null);
+        // Row 103 AfflictionEndGameRules: installs the native Simulacrum ruleset whose 0x2c9 mode 1 feeds the reward HUD.
+        GameEvents.EnterMessages.Add(module.Manifest.Id, player =>
+            SimulacrumRules.IsArena(player.Layout.Id) && AfflictionRuleset.Row is { } rules
+                ? [($"0x001f ruleset AfflictionEndGameRules (row {rules})", InstanceProtocol.AddRuleset(rules))] : []);
+        // A Simulacrum is entered through its map device and left through its own portal; the area's authored waypoint
+        // would offer a way out the encounter does not have.
+        InstanceEvents.AreaWaypoint.Add(module.Manifest.Id, (player, waypoint) =>
+            SimulacrumRules.IsArena(player.Layout.Id) ? null : waypoint);
+        GameEvents.PlayerEntered.Add(module.Manifest.Id, Enter);
+        GameEvents.PlayerLeaving.Add(module.Manifest.Id, (player, why) =>
         {
-            if (SimulacrumRules.IsArena(conn.Layout.Id))
+            if (SimulacrumRules.IsArena(player.Layout.Id))
             {
-                if (ViewOf(conn) is { } v)
-                    lock (conn.Monsters) { conn.Monsters.Remove(v.Entity); conn.MinionOrigins.TryRemove(v.Entity, out _); }
-                conn.Instance.ContentState.TryRemove($"{StateKey}.view.{conn.PeerId}", out _);
+                if (ViewOf(player) is { } v)
+                    { player.Area.Monsters.Remove(v.Entity); player.MinionOrigins.TryRemove(v.Entity, out _); }
+                player.Instance.ContentState.TryRemove($"{StateKey}.view.{player.Id}", out _);
             }
-            views.Remove(conn);
+            views.Remove(player);
             return Task.CompletedTask;
         });
-        GameEvents.Tick.Add(module.Manifest.Id, async (conn, _) =>
+        GameEvents.AreaTick.Add(module.Manifest.Id, start => !SimulacrumRules.IsArena(start.Layout.Id) ? null : async (player, _) =>
         {
-            if (!SimulacrumRules.IsArena(conn.Layout.Id) || !Current(conn)) return;
-            if (ViewOf(conn) is not { Native: true }) await Enter(conn);
-            if (conn.Paused || conn.PlayerLife == 0
-                || !ReferenceEquals(Clients(conn).Where(c => c.PlayerLife > 0).MinBy(c => c.PeerId), conn)) return;
-            await Step(conn);
+            if (!Current(player)) return;
+            if (ViewOf(player) is not { Native: true }) await Enter(player);
+            if (player.Paused || player.PlayerLife == 0
+                || !ReferenceEquals(Clients(player).Where(c => c.PlayerLife > 0).MinBy(c => c.Id), player)) return;
+            await Step(player);
         });
-        GameEvents.ObjectUse.Add(module.Manifest.Id, async (conn, use, requestedAt) =>
+        GameEvents.ObjectUse.Add(module.Manifest.Id, async (player, use, requestedAt) =>
         {
-            if (!SimulacrumRules.IsArena(conn.Layout.Id) || ViewOf(conn) is not { } view || use.TargetId != view.Entity) return false;
-            if (await WorldOf(conn).WalkUpTo(view.At.X, view.At.Y, 12, requestedAt)) await Start(conn);
+            if (!SimulacrumRules.IsArena(player.Layout.Id) || ViewOf(player) is not { } view || use.TargetId != view.Entity) return false;
+            if (await WorldOf(player).WalkUpTo(view.At.X, view.At.Y, 12, requestedAt)) await Start(player);
             return true;
         });
-        GameEvents.NpcTalk.Add(module.Manifest.Id, async (conn, id, _) =>
+        GameEvents.NpcTalk.Add(module.Manifest.Id, async (player, id, _) =>
         {
-            if (!SimulacrumRules.IsArena(conn.Layout.Id) || ViewOf(conn) is not { } v || v.Entity != id) return false;
-            await Start(conn); return true;
+            if (!SimulacrumRules.IsArena(player.Layout.Id) || ViewOf(player) is not { } v || v.Entity != id) return false;
+            await Start(player); return true;
         });
-        GameEvents.Drops.Add(module.Manifest.Id, drop => { if (SimulacrumRules.IsArena(drop.Conn.Layout.Id)) { drop.Cancel = true; drop.Gold = 0; } });
-        GameEvents.Experience.Add(module.Manifest.Id, gain =>
+        GameEvents.Drops.Add(module.Manifest.Id, (Action<DropRoll>)(drop => { if (SimulacrumRules.IsArena((string)drop.Player.Layout.Id)) { drop.Cancel = true; drop.Gold = 0; } }));
+        GameEvents.Experience.Add(module.Manifest.Id, (Action<ExperienceGain>)(gain =>
         {
-            if (SimulacrumRules.IsArena(gain.Conn.Layout.Id))
-                gain.Experience = (uint)Math.Min(uint.MaxValue, (ulong)gain.Experience * (uint)(100 + Math.Min(300, Math.Max(0, State(gain.Conn).Wave - 1) * 100 / 3)) / 100);
-        });
+            if (SimulacrumRules.IsArena((string)gain.Player.Layout.Id))
+                gain.Experience = (uint)Math.Min(uint.MaxValue, (ulong)((ulong)gain.Experience * (uint)(100 + Math.Min(300, (int)(Math.Max(0, (int)(State((Player)gain.Player).Wave - 1)) * 100 / 3))) / 100));
+        }));
         GameEvents.Kill.Add(module.Manifest.Id, kill =>
         {
-            if (!SimulacrumRules.IsArena(kill.Conn.Layout.Id)) return;
-            var run = State(kill.Conn);
+            if (!SimulacrumRules.IsArena(kill.Player.Layout.Id)) return;
+            var run = State(kill.Player);
             bool last;
-            // The ordinary hit path runs kill handlers outside the Monsters lock, while the spawner and Step change the
+            // The ordinary hit path runs kill handlers outside the area's frame, while the spawner and Step change the
             // same run under it (and another player's kill may run at once).
-            lock (kill.Conn.Monsters)
-            {
-                uint id = run.Monsters.FirstOrDefault(id => run.Bodies.TryGetValue(id, out var body) && ReferenceEquals(body, kill.Monster)
-                    || kill.Conn.Monsters.TryGetValue(id, out var m) && ReferenceEquals(m, kill.Monster));
-                if (id == 0 || !run.RecordKill(id)) return;
-                Save(kill.Conn, run);
-                last = run.Active && run.SpawningDone && run.Monsters.Count == 0;
-            }
+            uint id = run.Monsters.FirstOrDefault(id => run.Bodies.TryGetValue(id, out var body) && ReferenceEquals(body, kill.Monster)
+                || kill.Player.Area.Monsters.TryGetValue(id, out var m) && ReferenceEquals(m, kill.Monster));
+            if (id == 0 || !run.RecordKill(id)) return;
+            Save(kill.Player, run);
+            last = run.Active && run.SpawningDone && run.Monsters.Count == 0;
             if (last)
-                kill.Later(() => Clients(kill.Conn).MinBy(c => c.PeerId) is { } live ? Step(live) : Task.CompletedTask);
+                kill.Later(() => Clients(kill.Player).MinBy(c => c.Id) is { } live ? Step(live) : Task.CompletedTask);
         });
-        GameEvents.StateBuilding.Add(module.Manifest.Id, (conn, json) =>
+        GameEvents.StateBuilding.Add(module.Manifest.Id, (player, json) =>
         {
-            if (SimulacrumRules.IsArena(conn.Layout.Id))
-                lock (conn.Monsters) json["simulacrum"] = JsonSerializer.SerializeToNode(State(conn), serialization);
+            if (SimulacrumRules.IsArena(player.Layout.Id))
+                json["simulacrum"] = JsonSerializer.SerializeToNode(State(player), serialization);
         });
+        // A Simulacrum arena lies inside the Delirium fog for the whole run, so the player carries the fog flags the
+        // client's Delirium logic reads.
+        GameEvents.PlayerStatSources.Add(module.Manifest.Id, PlayerStats);
     }
 
-    Run State(ClientState conn) => runs.GetValue(conn.Instance, instance =>
-        instance.ContentState.TryGetValue(StateKey, out var text) ? JsonSerializer.Deserialize<Run>(text, serialization) ?? new() : new());
-    void Save(ClientState conn, Run run) => conn.Instance.ContentState[StateKey] = JsonSerializer.Serialize(run, serialization);
-    static bool Current(ClientState conn) => conn.PlayerSent && !conn.LeavingArea && !conn.Closed;
-    static IEnumerable<ClientState> Clients(ClientState conn) => InGame.Keys.Where(c => !c.Controlled && ReferenceEquals(c.Instance, conn.Instance) && Current(c));
-    View? ViewOf(ClientState conn)
+    static Dictionary<uint, int> PlayerStats(Player player, Dictionary<uint, int> stats)
     {
-        if (views.TryGetValue(conn, out var view)) return view;
-        if (!conn.Instance.ContentState.TryGetValue($"{StateKey}.view.{conn.PeerId}", out var text)) return null;
+        if (!SimulacrumRules.IsArena(player.Layout.Id)) return stats;
+        if (StatCatalog.IsClientId(Stat.AffectedByDelirium)) stats[Stat.AffectedByDelirium] = 1;
+        if (StatCatalog.IsClientId(Stat.IsInAfflictionFog)) stats[Stat.IsInAfflictionFog] = 1;
+        return stats;
+    }
+
+    static byte[]? BuildTilesPacket(Run run)
+    {
+        if (!run.Active || run.Rewards.Length == 0) return AfflictionRuleset.ClearRewardTiles();
+        var tiles = new AfflictionRuleset.RewardTile[run.Rewards.Length];
+        for (int i = 0; i < run.Rewards.Length; i++)
+        {
+            uint cur = (uint)Math.Max(0, i < run.RewardPoints.Length ? run.RewardPoints[i] : 0);
+            uint max = (uint)RewardGoal(run, i);
+            uint count = (uint)Math.Max(0, i < run.RewardCounts.Length ? run.RewardCounts[i] : 0);
+            tiles[i] = new((byte)run.Rewards[i], cur, max, count);
+        }
+        return AfflictionRuleset.RewardTiles(tiles);
+    }
+
+    static async Task PublishTiles(Player player, Run run, bool force = false)
+    {
+        if (BuildTilesPacket(run) is not { } packet) return;
+        if (!force && run.LastTiles is { } prev && prev.AsSpan().SequenceEqual(packet)) return;
+        run.LastTiles = packet;
+        int count = run.Active ? run.Rewards.Length : 0;
+        string log = $"0x02c9 ruleset AfflictionEndGameRules mode 1 ({count} tile(s))";
+        foreach (var peer in Clients(player))
+            await PlayerOf(peer).Send(packet, log);
+    }
+
+    Run State(Player player) => runs.GetValue(player.Instance, instance =>
+        instance.ContentState.TryGetValue(StateKey, out var text) ? JsonSerializer.Deserialize<Run>(text, serialization) ?? new() : new());
+    void Save(Player player, Run run) => player.Instance.ContentState[StateKey] = JsonSerializer.Serialize(run, serialization);
+    static bool Current(Player player) => player.Connection.PlayerSent && !player.LeavingArea && !player.Closed;
+    static IEnumerable<Player> Clients(Player player) => InGame.Keys.Where(c => !c.Controlled && ReferenceEquals(c.Instance, player.Instance) && Current(c));
+    View? ViewOf(Player player)
+    {
+        if (views.TryGetValue(player, out var view)) return view;
+        if (!player.Instance.ContentState.TryGetValue($"{StateKey}.view.{player.Id}", out var text)) return null;
         var parts = text.Split(',');
         if (parts.Length is not (4 or 5) || !uint.TryParse(parts[0], out uint entity) || !uint.TryParse(parts[1], out uint stash)
             || !int.TryParse(parts[2], out int x) || !int.TryParse(parts[3], out int y)) return null;
-        return views.GetValue(conn, _ => new View { Entity = entity, Stash = stash, At = (x, y), Native = parts.Length == 5 && parts[4] == "1" });
+        return views.GetValue(player, _ => new View { Entity = entity, Stash = stash, At = (x, y), Native = parts.Length == 5 && parts[4] == "1" });
     }
 
-    async Task Enter(ClientState conn)
+    async Task Enter(Player player)
     {
-        if (!SimulacrumRules.IsArena(conn.Layout.Id)) return;
-        var (remote, stream, ciphers) = conn.Wire;
-        var view = ViewOf(conn) ?? views.GetOrCreateValue(conn);
+        if (!SimulacrumRules.IsArena(player.Layout.Id)) return;
+        var view = ViewOf(player) ?? views.GetOrCreateValue(player);
         if (view.Native || view.Repairing) return;
         view.Repairing = true;
-        try { await CreateStarter(conn, view, State(conn)); }
+        try { await CreateStarter(player, view, State(player)); }
         finally { view.Repairing = false; }
         if (view.Stash == 0)
         {
-        var stashAt = conn.Layout.Near((conn.Layout.SpawnX - 15, conn.Layout.SpawnY + 8));
-        uint stash = conn.TakeObjectId(); view.Stash = stash;
-        await SendWorldCreate(remote, stream, ciphers, conn, stash, InstanceEntities.CreateObject(stash,
-            InstanceEntities.ObjectTypeHash(StashObject.MetadataPath), new StashObject(stashAt.X, stashAt.Y, 0).Blob()), "Simulacrum: stash between waves");
-        await SendWorldRecord(remote, stream, ciphers, conn, stash, InstanceProtocol.EnterWakeZone(stash), null);
-        conn.StashObject = stash; conn.StashAt = stashAt;
+            var stashAt = player.Layout.Near(StashSpot(player.Layout.Id) is { } spot ? (spot.X, spot.Y)
+                : (player.Layout.SpawnX - 15, player.Layout.SpawnY + 8));
+            uint stash = player.TakeObjectId(); view.Stash = stash;
+            await SendWorldCreate(player, stash, () => InstanceEntities.CreateObject(stash,
+                InstanceEntities.ObjectTypeHash(StashObject.MetadataPath),
+                new StashObject(stashAt.X, stashAt.Y, StashSpot(player.Layout.Id)?.Turn ?? 0).Blob()),
+                    "Simulacrum: stash between waves", wake: true, awaitBirth: false);
+            player.StashObject = stash; player.StashAt = stashAt; global::Game.SetAreaStash(player, stash, stashAt);
         }
-        SaveView(conn, view);
-        var run = State(conn);
-        await PlayerOf(conn).Tell(run.Wave == SimulacrumRules.Waves && run.Rewarded ? "Simulacrum complete. All 15 waves defeated."
+        SaveView(player, view);
+        var run = State(player);
+        if (run.Active && run.Rewards.Length > 0 && BuildTilesPacket(run) is { } tiles)
+            await PlayerOf(player).Send(tiles, $"0x02c9 ruleset AfflictionEndGameRules mode 1 ({run.Rewards.Length} tile(s))");
+        await PlayerOf(player).Tell(run.Wave == SimulacrumRules.Waves && run.Rewarded ? "Simulacrum complete. All 15 waves defeated."
             : run.Active ? $"Simulacrum: wave {run.Wave}/15 continues."
             : $"Simulacrum: interact with the familiar entity to begin wave {run.Wave + 1}/15.");
     }
 
-    async Task Start(ClientState conn)
+    async Task Start(Player player)
     {
-        var run = State(conn);
+        var run = State(player);
         if (run.Wave == SimulacrumRules.Waves && run.Rewarded)
         {
-            var wire = conn.Wire;
             if (Descendancies.Find("Delirious") is { } bloodline)
-                await OpenDescendancySelector(wire.Remote, wire.Stream, wire.Ciphers, conn, bloodline.Index);
+                await OpenDescendancySelector(player, bloodline.Index);
             return;
         }
-        lock (conn.Monsters)
-        {
-            if (!Current(conn) || conn.PlayerLife == 0 || run.Active || run.Busy || run.Wave >= SimulacrumRules.Waves) return;
-            run.Busy = true;
-        }
+        if (!Current(player) || player.PlayerLife == 0 || run.Active || run.Busy || run.Wave >= SimulacrumRules.Waves) return;
+        run.Busy = true;
         List<uint> cleared = [], shown = [];
         try
         {
-            var prepared = run.Next ?? PrepareWave(conn, run.Wave + 1, run);
-            // A preview retained across this module upgrade keeps its affixes, but adopts the new population model.
+            var prepared = run.Next ?? PrepareWave(player, run.Wave + 1, run);
+            // A preview retained across this module upgrade keeps its affixes, but adopts the new population model and
+            // gains the reward-type mods added after it was saved.
             if (prepared.ProgressGoal == 0) prepared.ProgressGoal = WaveProgressGoal(run.Wave + 1);
-            lock (conn.Monsters)
-            {
-                if (!Current(conn) || conn.PlayerLife == 0) return;
-                // No automatic advance; this is the only transition into a new wave.
-                run.Wave++; run.Active = true; run.Rewarded = false; run.Spawned = run.Kills = 0;
-                run.Budget = prepared.Budget; run.Rewards = prepared.Rewards; run.Modifiers = prepared.Modifiers;
-                run.ProgressGoal = prepared.ProgressGoal; run.SpawnPoints = run.KillPoints = 0; run.MonsterPoints.Clear();
-                run.Affixes = prepared.Affixes; run.Next = null;
-                run.ModifierNames = prepared.ModifierNames; run.OmniThisWave = prepared.OmniThisWave; run.KosisThisWave = prepared.KosisThisWave;
-                run.Monsters.Clear(); run.Bodies.Clear(); run.Started = conn.Clock.Elapsed.TotalSeconds; run.NextSpawnAt = run.Started;
-                cleared = ClearGround(conn.Instance.Ground);
-                // This client hears of its own at once; the others' ground syncs remove theirs.
-                foreach (uint id in cleared)
-                    if (conn.SeenGround.Remove(id)) shown.Add(id);
-                Save(conn, run);
-            }
+            if (prepared.RewardMods.Length == 0 && prepared.Rewards.Length > 0) prepared.RewardMods = RewardModsFor(player, prepared.Rewards);
+            if (!Current(player) || player.PlayerLife == 0) return;
+            // No automatic advance; this is the only transition into a new wave.
+            run.Wave++; run.Active = true; run.Rewarded = false; run.Spawned = run.Kills = 0;
+            run.Budget = prepared.Budget; run.Rewards = prepared.Rewards; run.Modifiers = prepared.Modifiers;
+            run.ProgressGoal = prepared.ProgressGoal; run.SpawnPoints = run.KillPoints = 0; run.MonsterPoints.Clear();
+            run.RewardPoints = new int[run.Rewards.Length]; run.RewardCounts = new int[run.Rewards.Length];
+            run.Affixes = prepared.Affixes; run.RewardMods = prepared.RewardMods; run.Next = null;
+            run.ModifierNames = prepared.ModifierNames; run.OmniThisWave = prepared.OmniThisWave; run.KosisThisWave = prepared.KosisThisWave;
+            run.OmniSpawnedThisWave = run.KosisSpawnedThisWave = false;
+            run.Monsters.Clear(); run.Bodies.Clear(); run.Started = AreaTime(player); run.NextSpawnAt = run.Started;
+            cleared = ClearGround(player.Instance.Ground);
+            // Every client hears of it: the removals are the area's records.
+            shown.AddRange(cleared);
+            var strays = ClearMonsters(player, run);
+            Save(player, run);
+            foreach (var peer in Clients(player)) await WorldOf(peer).RefreshStats();
             if (cleared.Count > 0) Console.WriteLine($"[gateway] Simulacrum wave {run.Wave}: {cleared.Count} items on the ground destroyed");
-            var (remote, stream, ciphers) = conn.Wire;
             foreach (uint id in shown)
-                await SendWorldRemoval(remote, stream, ciphers, conn, id, $"0x02bd remove world item 0x{id:x} (Simulacrum wave {run.Wave} begins)");
-            await Broadcast(conn, $"Simulacrum — Wave {run.Wave}/15 · Monster level {SimulacrumRules.Level(run.Wave)} · {SimulacrumRules.Delirious(run.Wave)}% Delirious\n"
-                + string.Join("; ", run.ModifierNames));
-            await PublishStarter(conn, run, recreate: false);
+                await SendWorldRemoval(player, id, $"0x02bd remove world item 0x{id:x} (Simulacrum wave {run.Wave} begins)");
+            foreach (uint id in strays)
+                await SendWorldRemoval(player, id, $"0x02bd remove monster 0x{id:x} (Simulacrum wave {run.Wave} begins)");
+            await PublishTiles(player, run, force: true);
+            await PublishStarter(player, run, recreate: false);
         }
-        finally { lock (conn.Monsters) run.Busy = false; }
-        await Step(conn);
+        finally { run.Busy = false; }
+        await Step(player);
     }
 
     /// <summary>Every item on the arena's ground goes when the next wave begins, the players' own drops too (3.29.3c
@@ -235,34 +316,67 @@ public sealed partial class DeliriumModule : IModule
         return cleared;
     }
 
-    async Task Step(ClientState conn)
+    /// <summary>
+    /// Living hostile monsters the area still holds when a wave ends or the next begins (including unrisen dormant
+    /// ones). A boss's summons and its phased bodies are not in the wave's list, so nothing in the wave's accounting
+    /// removes them and their entrance grace leaves them unkillable. Dead corpses and friendly player minions
+    /// (<see cref="SpawnedMonster.OriginallyHostile"/> false) are kept. Returns the ids that went.
+    /// </summary>
+    static List<uint> ClearMonsters(Player player, Run run)
     {
-        var run = State(conn);
-        lock (conn.Monsters)
+        List<uint> cleared = [.. player.Area.Monsters
+            .Where(pair => pair.Value.OriginallyHostile && !pair.Value.Dead && pair.Value.Life > 0)
+            .Select(pair => pair.Key)];
+        List<uint> dormant = [.. player.Area.DormantMonsters
+            .Where(pair => pair.Value.OriginallyHostile && !pair.Value.Dead && pair.Value.Life > 0)
+            .Select(pair => pair.Key)];
+        foreach (uint id in cleared)
         {
-            if (!context.Lifetime.IsActive || !Current(conn) || !run.Active || run.Busy) return;
-            run.Busy = true;
-            foreach (uint id in run.Monsters.ToArray())
-            {
-                // Bodies is not saved: after a module reload it is learnt again from the list here, so a later
-                // corpse-consuming kill is still matched.
-                if (conn.Monsters.TryGetValue(id, out var monster)) run.Bodies.TryAdd(id, monster);
-                if (monster is not null ? monster.Dead || monster.Life == 0
-                    : run.Bodies.TryGetValue(id, out var body) && (body.Dead || body.Life == 0)) run.RecordKill(id);
-            }
+            if (player.Area.Monsters.Remove(id, out var m)) { m.Dead = true; m.Life = 0; m.ActionGeneration++; }
+            player.Instance.World.MonsterOrigins.TryRemove(id, out _);
+            run.Monsters.Remove(id); run.Bodies.Remove(id); run.MonsterPoints.Remove(id);
         }
-        try
+        foreach (uint id in dormant)
         {
-            if (run.VisualVersion == 0) await RevealExisting(conn, run);
-            if (!run.SpawningDone) await SpawnBatch(conn, run);
-            if (run.SpawningDone && run.Monsters.Count == 0) await Complete(conn, run);
+            if (player.Area.DormantMonsters.Remove(id, out var m)) { m.Dead = true; m.Life = 0; m.ActionGeneration++; }
+            player.Instance.World.MonsterOrigins.TryRemove(id, out _);
+            run.Monsters.Remove(id); run.Bodies.Remove(id); run.MonsterPoints.Remove(id);
+            cleared.Add(id);
         }
-        finally { lock (conn.Monsters) run.Busy = false; }
+        if (cleared.Count > 0) player.Area.MonstersVersion++;
+        return cleared;
     }
 
-    static async Task Broadcast(ClientState conn, string text)
+    async Task Step(Player player)
     {
-        foreach (var peer in Clients(conn))
+        var run = State(player);
+        if (!context.Lifetime.IsActive || !Current(player) || !run.Active || run.Busy) return;
+        run.Busy = true;
+        run.SizeRewards();
+        bool killed = false;
+        foreach (uint id in run.Monsters.ToArray())
+        {
+            // Bodies is not saved: after a module reload it is learnt again from the list here, so a later
+            // corpse-consuming kill is still matched.
+            if (player.Area.Monsters.TryGetValue(id, out var monster)) run.Bodies.TryAdd(id, monster);
+            if ((monster is not null ? monster.Dead || monster.Life == 0
+                : run.Bodies.TryGetValue(id, out var body) && (body.Dead || body.Life == 0)) && run.RecordKill(id))
+                killed = true;
+        }
+        if (killed) Save(player, run);
+        try
+        {
+            if (run.VisualVersion == 0) await RevealExisting(player, run);
+            if (!run.SpawningDone) await SpawnBatch(player, run);
+            if (run.SpawningDone && run.Monsters.Count == 0) await Complete(player, run);
+            else await PublishTiles(player, run);
+        }
+        finally { run.Busy = false; }
+    }
+
+    static async Task Broadcast(Player player, string text)
+    {
+        foreach (var peer in Clients(player))
             await PlayerOf(peer).Tell(text);
     }
 }

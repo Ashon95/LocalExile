@@ -5,195 +5,444 @@ using GameServer.Core.World;
 
 public static partial class Game
 {
-    static readonly HashSet<string> CurseRecipientStats = [
-        "base_resist_all_elements_%", "base_fire_damage_resistance_%", "base_cold_damage_resistance_%",
-        "base_lightning_damage_resistance_%", "base_chaos_damage_resistance_%", "accuracy_rating_+%",
-        "enfeeble_damage_+%_final", "enfeeble_damage_+%_vs_rare_or_unique_final", "physical_damage_taken_+%",
-        "damage_taken_+%_on_low_life", "debilitate_self_for_x_milliseconds_on_hit",
-        "temporal_chains_action_speed_+%_final", "temporal_chains_action_speed_+%_vs_rare_or_unique_final",
-        "buff_time_passed_+%_other_than_temporal_chains", "chance_to_be_ignited_%", "chance_to_be_frozen_%", "chance_to_be_shocked_%",
-        "receive_bleeding_chance_%_when_hit_by_attack", "enemy_aggravate_bleeding_on_attack_hit_chance_%_against_self",
-        "enemy_additional_critical_strike_chance_against_self", "enemy_additional_critical_strike_multiplier_against_self",
-        "life_granted_when_killed", "mana_granted_when_killed", "chance_to_grant_power_charge_on_death_%",
-        "chance_to_grant_frenzy_charge_on_death_%", "chance_to_grant_endurance_charge_on_death_%",
-        "grant_attacker_power_charge_when_hit_%_chance", "grant_attacker_frenzy_charge_when_hit_%_chance", "grant_attacker_endurance_charge_when_hit_%_chance",
-        "projectiles_hitting_self_split_into_x", "projectile_damage_taken_+%", "base_additional_physical_damage_reduction_%",
-        "minimum_added_physical_damage_taken", "maximum_added_physical_damage_taken", "life_granted_when_hit_by_attacks", "mana_granted_when_hit_by_attacks",
-        "enemy_grant_X_rage_on_stun", "enemy_chance_to_double_stun_duration_%_vs_self",
-        "life_leech_on_any_damage_when_hit_by_attack_permyriad", "mana_leech_on_any_damage_when_hit_by_attack_permyriad",
-        "alchemists_mark_grant_attacker_x_flask_charges_when_hit_once_per_3s",
-        "alchemists_mark_igniter_creates_burning_ground_%_ignite_damage", "alchemists_mark_poisoner_creates_caustic_ground_%_poison_damage"
+    static readonly HashSet<uint> CurseRecipientStats = [
+        Stat.BaseResistAllElementsPct, Stat.BaseFireDamageResistancePct, Stat.BaseColdDamageResistancePct,
+        Stat.BaseLightningDamageResistancePct, Stat.BaseChaosDamageResistancePct, Stat.AccuracyRatingPlusPct,
+        Stat.EnfeebleDamagePlusPctFinal, Stat.EnfeebleDamagePlusPctVsRareOrUniqueFinal, Stat.PhysicalDamageTakenPlusPct,
+        Stat.DamageTakenPlusPctOnLowLife, Stat.DebilitateSelfForXMillisecondsOnHit,
+        Stat.TemporalChainsActionSpeedPlusPctFinal, Stat.TemporalChainsActionSpeedPlusPctVsRareOrUniqueFinal,
+        Stat.BuffTimePassedPlusPctOtherThanTemporalChains, Stat.ChanceToBeIgnitedPct, Stat.ChanceToBeFrozenPct, Stat.ChanceToBeShockedPct,
+        Stat.ReceiveBleedingChancePctWhenHitByAttack, Stat.EnemyAggravateBleedingOnAttackHitChancePctAgainstSelf,
+        Stat.EnemyAdditionalCriticalStrikeChanceAgainstSelf, Stat.EnemyAdditionalCriticalStrikeMultiplierAgainstSelf,
+        Stat.LifeGrantedWhenKilled, Stat.ManaGrantedWhenKilled, Stat.ChanceToGrantPowerChargeOnDeathPct,
+        Stat.ChanceToGrantFrenzyChargeOnDeathPct, Stat.ChanceToGrantEnduranceChargeOnDeathPct,
+        Stat.GrantAttackerPowerChargeWhenHitPctChance, Stat.GrantAttackerFrenzyChargeWhenHitPctChance, Stat.GrantAttackerEnduranceChargeWhenHitPctChance,
+        Stat.ProjectilesHittingSelfSplitIntoX, Stat.ProjectileDamageTakenPlusPct, Stat.BaseAdditionalPhysicalDamageReductionPct,
+        Stat.MinimumAddedPhysicalDamageTaken, Stat.MaximumAddedPhysicalDamageTaken, Stat.LifeGrantedWhenHitByAttacks, Stat.ManaGrantedWhenHitByAttacks,
+        Stat.EnemyGrantXRageOnStun, Stat.EnemyChanceToDoubleStunDurationPctVsSelf,
+        Stat.LifeLeechOnAnyDamageWhenHitByAttackPermyriad, Stat.ManaLeechOnAnyDamageWhenHitByAttackPermyriad,
+        Stat.AlchemistsMarkGrantAttackerXFlaskChargesWhenHitOncePer3s,
+        Stat.AlchemistsMarkIgniterCreatesBurningGroundPctIgniteDamage, Stat.AlchemistsMarkPoisonerCreatesCausticGroundPctPoisonDamage
     ];
 
-    static bool ExternalTemporalChains(ClientState conn, string effect) => effect == "TemporalChains"
-        && GameEvents.GrantedSkillExecutable.For(conn).Any(accept => accept(conn, effect));
+    static readonly RuleTable<SkillCatalog, IReadOnlyDictionary<uint, int>> TemporalChainsOnHitStats = new();
 
-    static void CurseCharges(ClientState conn, SpawnedMonster target, bool death)
+    static bool ExternalTemporalChains(Player player, string effect) => effect == "TemporalChains"
+        && GameEvents.GrantedSkillExecutable.For(player).Any(accept => accept(player, effect));
+
+    static readonly (ChargeType Type, uint Death, uint Hit)[] CurseChargeStats =
+    [
+        (ChargeType.Power, Stat.ChanceToGrantPowerChargeOnDeathPct, Stat.GrantAttackerPowerChargeWhenHitPctChance),
+        (ChargeType.Frenzy, Stat.ChanceToGrantFrenzyChargeOnDeathPct, Stat.GrantAttackerFrenzyChargeWhenHitPctChance),
+        (ChargeType.Endurance, Stat.ChanceToGrantEnduranceChargeOnDeathPct, Stat.GrantAttackerEnduranceChargeWhenHitPctChance),
+    ];
+
+    static void CurseCharges(Player player, SpawnedMonster target, bool death, double now, GolemState.Golem? fighter = null)
     {
-        foreach (var (kind, name) in new[] { (ChargeType.Power, "power"), (ChargeType.Frenzy, "frenzy"), (ChargeType.Endurance, "endurance") })
-            if (RandomRolls.Chance(target.Curses[death ? $"chance_to_grant_{name}_charge_on_death_%" : $"grant_attacker_{name}_charge_when_hit_%_chance"], 100, Random.Shared))
-                ChargesOf(conn).Enqueue(new ChargeEvent.Grant(kind, 1, "curse"));
+        if (target.Curses.All.Count == 0) return;
+        target.Curses.Expire(now);
+        var random = AreaRng(player);
+        foreach (var (type, onDeath, onHit) in CurseChargeStats)
+            if (RandomRolls.Chance(target.Curses[death ? onDeath : onHit], 100, random))
+            {
+                if (fighter is null) ChargesOf(player).Enqueue(new ChargeEvent.Grant(type, 1, "curse"));
+                else GrantMinionChargeLocked(player, fighter, type, 1, now);
+            }
     }
 
-    static int CurseLimit(ClientState conn, IReadOnlyDictionary<uint, int> player)
+    static int CurseLimit(Player player, IReadOnlyDictionary<uint, int> playerStats)
     {
-        int Get(string n) => GolemStat(player, n);
-        return Get("has_curse_limit_equal_to_maximum_power_charges") != 0 ? Get("max_power_charges")
-            : Math.Max(0, 1 + Get("number_of_additional_curses_allowed"));
+        int Get(uint n) => GolemStat(playerStats, n);
+        // Anathema: the maximum Power Charges (Character.ot's 3 with the mods), not the raw +N stat.
+        return Get(Stat.HasCurseLimitEqualToMaximumPowerCharges) != 0 ? ChargeMaxima.Of(ChargeType.Power, Get)
+            : Math.Max(0, 1 + Get(Stat.NumberOfAdditionalCursesAllowed));
     }
 
-    public static int CurseRadius(ClientState conn, ushort skill, bool aura, SupportedGem? captured = null, IReadOnlyDictionary<uint, int>? sources = null)
+    public static int CurseRadius(Player player, ushort skill, bool aura, SupportedGem? captured = null, IReadOnlyDictionary<uint, int>? sources = null)
     {
-        var own = (captured ?? SupportedSkill(conn, skill)).Stats; var player = sources ?? CharacterPlayerStats(conn);
-        int Get(string n) => GolemStat(player, n) + GolemStat(own, n);
+        var gem = captured ?? SupportedSkill(player, skill);
+        var area = SkillAreaStats(player, gem.Stats, gem.Effect, sources ?? CharacterPlayerStats(player));
+        int Get(uint n) => GolemStat(area, n);
         // Hexes retain their own base radius when Blasphemy converts them to auras.
         return SkillArea.Radius(22,
-            n => Get(n) + (n == SkillArea.BaseIncreased ? Get("curse_area_of_effect_+%") : 0), spell: true);
+            n => Get(n) + (n == SkillArea.BaseIncreased ? Get(Stat.CurseAreaOfEffectPlusPct) : 0), spell: true);
     }
 
-    public static bool ApplyCurseLocked(ClientState conn, SpawnedMonster monster, ushort skill, double now, bool aura,
+    public static bool ApplyCurseLocked(Player player, SpawnedMonster monster, ushort skill, double now, bool aura,
         SupportedGem? captured = null, IReadOnlyDictionary<uint, int>? sources = null)
+        => ApplyCurseLocked(player, monster, skill, now, aura, captured, sources, 0, 1);
+
+    static bool ApplyCurseLocked(Player player, SpawnedMonster monster, ushort skill, double now, bool aura,
+        SupportedGem? captured, IReadOnlyDictionary<uint, int>? sources, int addedEffect, double effectMultiplier,
+        bool fromPlacement = false)
     {
-        var gem = captured ?? SupportedSkill(conn, skill); string effect = SkillsFor(conn).EffectId(gem.Effect) ?? "";
-        if (!CurseCatalog.All.TryGetValue(effect, out var definition) || ExternalTemporalChains(conn, effect)
-            || monster.Dead || monster.Life == 0 || !monster.Hostile || !gem.RequirementsMet) return false;
-        var player = sources ?? CharacterPlayerStats(conn);
-        int Own(string n) => GolemStat(gem.Stats, n);
-        int Get(string n) => GolemStat(player, n) + Own(n);
-        if (monster.Mods.Effects["immune_to_curses"] != 0 || !definition.Mark && monster.Mods.Effects["hexproof"] != 0
-            && Get("ignore_hexproof") == 0 && Get("hexes_ignore_hexproof") == 0
-            && !RandomRolls.Chance(Get("chance_to_ignore_hexproof_%"), 100, Random.Shared)) return false;
-        double factor = Math.Max(0, 1 + (Get("curse_effect_+%") + Get(definition.Mark ? "mark_effect_+%" : "hex_effect_+%")
-            + (definition.Mark ? Get("mark_skills_curse_effect_+%") : 0)
-            + Get(ReservationNames.GetValueOrDefault(effect, effect.ToLowerInvariant()) + "_curse_effect_+%")
-            + monster.Mods.Effects["curse_effect_on_self_+%"]) / 100.0)
-            * Math.Max(0, 1 + Own("support_blasphemy_curse_effect_+%_final") / 100.0)
-            * Math.Max(0, 1 + Own("support_hextouch_curse_effect_+%_final") / 100.0);
-        var stats = gem.Stats.Where(p => CurseRecipientStats.Contains(Stats.Name(p.Key) ?? ""))
-            .ToDictionary(p => Stats.Name(p.Key)!, p => (int)Math.Truncate(p.Value * factor));
-        double seconds = definition.Mark ? double.PositiveInfinity : SkillDurationModifiers.Seconds(Own("base_skill_effect_duration"),
-            n => GolemStat(player, n) + (n == SkillDurationModifiers.IncreasedDuration ? Get("curse_duration_+%") + Get("curse_skill_effect_duration_+%") : 0),
-            n => Own(n) + (n == SkillDurationModifiers.IncreasedDuration ? Own("base_curse_duration_+%") : 0));
-        double rate = RecipientEffectTime.Rate(5, n => monster.Mods.Effects[n], temporalChains: effect == "TemporalChains");
-        seconds *= Math.Max(0, 1 + Own("hextouch_support_curse_duration_+%_final") / 100d);
-        if (aura && monster.Curses.All.GetValueOrDefault((conn.PeerId, effect)) is { Aura: true } existing
-            && existing.Skill == skill && existing.Stats.Count == stats.Count && existing.Stats.All(p => stats.GetValueOrDefault(p.Key) == p.Value)) return true;
+        var gem = captured ?? SupportedSkill(player, skill);
+        return gem.RequirementsMet && ApplyCurseDataLocked(player, monster, skill, SkillsFor(player).EffectId(gem.Effect) ?? "",
+            gem.Stats, now, aura, sources, addedEffect, effectMultiplier, fromPlacement: fromPlacement);
+    }
+
+    static bool ApplyCurseDataLocked(Player player, SpawnedMonster monster, ushort skill, string effect,
+        IReadOnlyDictionary<uint, int> curseStats, double now, bool aura, IReadOnlyDictionary<uint, int>? sources,
+        int addedEffect = 0, double effectMultiplier = 1, uint? casterId = null, int additionalCapacity = 0, uint? auraSource = null,
+        bool fromPlacement = false)
+    {
+        if (!CurseCatalog.All.TryGetValue(effect, out var definition) || casterId is null && ExternalTemporalChains(player, effect)
+            || monster.Dead || monster.Life == 0 || !monster.Hostile) return false;
+        var playerStats = sources ?? CharacterPlayerStats(player);
+        int Own(uint n) => GolemStat(curseStats, n);
+        int Get(uint n) => GolemStat(playerStats, n) + Own(n);
+        bool hexMaster = Get(Stat.KeystoneHexMaster) != 0;
+        if (monster.Mods.Effects[Stat.ImmuneToCurses] != 0 || !definition.Mark && monster.Mods.Effects[Stat.Hexproof] != 0
+            && Get(Stat.IgnoreHexproof) == 0 && Get(Stat.Of("hexes_ignore_hexproof")) == 0
+            && (effect != "ElementalWeakness" || Get(Stat.ElementalWeaknessIgnoresHexproof) == 0)
+            && !RandomRolls.Chance(Get(Stat.ChanceToIgnoreHexproofPct), 100, AreaRng(player))) return false;
+        int increased = Get(Stat.CurseEffectPlusPct) + Get(Stat.Of(definition.Mark ? "mark_effect_+%" : "hex_effect_+%"))
+            + (definition.Mark ? Get(Stat.MarkSkillsCurseEffectPlusPct) : 0)
+            + Get(Stat.Of(ReservationNames.GetValueOrDefault(effect, effect.ToLowerInvariant()) + "_curse_effect_+%"))
+            + monster.Mods.Effects[Stat.CurseEffectOnSelfPlusPct] + addedEffect;
+        double more = Math.Max(0, 1 + Own(Stat.SupportBlasphemyCurseEffectPlusPctFinal) / 100.0)
+            * Math.Max(0, 1 + Own(Stat.SupportHextouchCurseEffectPlusPctFinal) / 100.0)
+            * Math.Max(0, 1 + monster.Mods.Effects[Stat.CurseEffectOnSelfPlusPctFinal] / 100.0)
+            * Math.Max(0, 1 + monster.Mods.Effects[Stat.MapMonstersCurseEffectOnSelfPlusPctFinal] / 100.0)
+            * effectMultiplier * (hexMaster ? .8 : 1);
+        Dictionary<uint, int> RecipientStats(int extra) => curseStats.Where(p => CurseRecipientStats.Contains(p.Key))
+            .ToDictionary(p => p.Key, p => (int)Math.Truncate(p.Value * Math.Max(0, 1 + ((long)increased + extra) / 100d) * more));
+        var stats = RecipientStats(0);
+        double seconds = definition.Mark ? double.PositiveInfinity : SkillDurationModifiers.Seconds(Own(Stat.BaseSkillEffectDuration),
+            n => GolemStat(playerStats, n) + (n == SkillDurationModifiers.IncreasedDuration ? Get(Stat.CurseDurationPlusPct) + Get(Stat.CurseSkillEffectDurationPlusPct) : 0),
+            n => Own(n) + (n == SkillDurationModifiers.IncreasedDuration ? Own(Stat.BaseCurseDurationPlusPct) : 0));
+        var recipientEffects = monster.Effects;
+        bool temporalChains = effect == "TemporalChains";
+        double rate = RecipientEffectTime.Rate(5, n => recipientEffects[n], temporalChains);
+        seconds *= Math.Max(0, 1 + Own(Stat.HextouchSupportCurseDurationPlusPctFinal) / 100d);
+        uint caster = casterId ?? auraSource ?? player.Id;
+        int damageTaken = GolemStat(playerStats, Stat.EnemiesDamageTakenPlusPctWhileCursed);
+        bool preventsCritical = Get(definition.Mark ? Stat.MarkedEnemiesCannotDealCriticalStrikes : Stat.HexedEnemiesCannotDealCriticalStrikes) != 0;
+        int limit = CurseLimit(player, playerStats);
+        int expandedCapacity = additionalCapacity > 0 ? ActorScale.Saturate((long)limit + additionalCapacity) : 0;
+        if (aura && monster.Curses.All.GetValueOrDefault((caster, effect)) is { Aura: true } existing
+            && existing.Skill == skill && existing.ExpandedCapacity == expandedCapacity && existing.CursedDamageTaken == damageTaken
+            && existing.PreventsCriticalStrikes == preventsCritical
+            && existing.Stats.Count == stats.Count && existing.Stats.All(p => stats.GetValueOrDefault(p.Key) == p.Value)) return true;
+        bool newlyCursed = !monster.HasCurses || !monster.Curses.HasActive(now);
         if (definition.Mark)
-            foreach (var m in conn.Monsters.Values.Where(m => !ReferenceEquals(m, monster)))
-                foreach (var mark in m.Curses.All.Values.Where(c => c.Caster == conn.PeerId && c.Mark).ToArray()) m.Curses.Remove(mark.Caster, mark.Effect);
-        monster.Curses.Put(new(conn.PeerId, effect, skill, definition.Buff, conn.NextBuff++, now,
-            aura ? double.PositiveInfinity : now + seconds / rate, aura, definition.Mark, stats), CurseLimit(conn, player));
+            foreach (var m in player.Area.Monsters.Values.Where(m => !ReferenceEquals(m, monster) && m.HasCurses))
+                foreach (var mark in m.Curses.All.Values.Where(c => c.Caster == player.Id && c.Mark).ToArray())
+                { m.Curses.Remove(mark.Caster, mark.Effect); m.PresentationChanged?.Invoke(); }
+        double until = aura || hexMaster && !definition.Mark ? double.PositiveInfinity : now + seconds / rate;
+        int amplify = double.IsFinite(until) ? Get(Stat.WhileCurseIs50PctExpiredCurseEffectPlusPct) : 0;
+        var curse = new MonsterCurses.Curse(caster, effect, skill, definition.Buff, player.NextBuff++, now, until, aura, definition.Mark, stats)
+        {
+            RemainsOnDeath = !aura && Get(Stat.CursesYouInflictRemainAfterDeath) != 0,
+            ExpandedCapacity = expandedCapacity,
+            CursedDamageTaken = damageTaken,
+            PreventsCriticalStrikes = preventsCritical,
+            TransferChance = definition.Mark ? Get(Stat.YourMarksTransferToNearbyEnemiesOnDeathPctChance) : 0,
+            Rate = rate,
+            UsesBaseExpiryRate = temporalChains,
+            AmplifiesAt = amplify == 0 ? double.PositiveInfinity : now + (until - now) / 2,
+            AmplifiedStats = amplify == 0 ? null : RecipientStats(amplify),
+        };
+        monster.Curses.Put(curse, limit);
+        if (!ReferenceEquals(monster.Curses.All.GetValueOrDefault((curse.Caster, curse.Effect)), curse)) return false;
+        if (!fromPlacement && !aura && Get(Stat.RefreshDurationOfShockChillIgniteOnEnemyWhenCursingEnemy) != 0)
+        {
+            monster.Ailments.RefreshChillAndShock(now);
+            monster.Ignites.Refresh(now);
+        }
+        if (newlyCursed && !fromPlacement && !aura && casterId is null)
+        {
+            if (Get(Stat.NonCursedEnemiesYouCurseAreBlindedFor4Seconds) != 0)
+                InflictMonsterBlind(player, monster.ObjectId, monster, now, 100, Get(Stat.BlindEffectPlusPct), BlindSeconds(Get), null);
+            RecoverOnFreshCurseLocked(player, Get);
+        }
+        if (!aura || casterId is not null) monster.PresentationChanged?.Invoke();
         return true;
     }
 
-    static void CursesOnHitLocked(ClientState conn, SpawnedMonster target, ushort sourceSkill, bool spell, double now)
+    static void RecoverOnFreshCurseLocked(Player player, Func<uint, int> get)
     {
-        if (target.Dead || target.Life == 0 || conn.Reservations.Secondary) return;
-        var source = sourceSkill != 0 ? SupportedSkill(conn, sourceSkill) : null;
-        bool hextouch = source is not null && GolemStat(source.Stats, "apply_linked_curses_on_hit_%") is var chance
-            && RandomRolls.Chance(chance, 100, Random.Shared);
-        if (!hextouch && (spell || target.Rarity is not (MonsterRarity.Rare or MonsterRarity.Unique))) return;
-        var player = CharacterPlayerStats(conn);
-        foreach (var skill in GemSkillEffects(conn))
+        int lifePct = LifeRecovery.NonLeechBlocked(get) ? 0 : get(Stat.RecoverPctMaximumLifeWhenCursingNonCursedEnemy);
+        int manaPct = get(Stat.RecoverPctMaximumManaWhenCursingNonCursedEnemy);
+        if (player.PlayerLife == 0 || lifePct <= 0 && manaPct <= 0) return;
+        var session = LeechOf(player);
+        uint life = player.PlayerLife, mana = player.PlayerMana;
+        if (lifePct > 0)
+            player.PlayerLife = PetrifiedBlood.RecoverLife(player, life,
+                (long)player.PlayerMaxLife * lifePct / 100, ref session.LifeInstantCarry, minimum: 1);
+        if (manaPct > 0)
+            player.PlayerMana = RecoveryPool.Advance(mana, (uint)UnreservedMana(player),
+                (long)player.Pools.Mana * manaPct / 100, ref session.ManaInstantCarry);
+        session.InstantLifeChanged |= life != player.PlayerLife;
+        session.InstantManaChanged |= mana != player.PlayerMana;
+    }
+
+    static void TransferMarksOnDeathLocked(Player player, SpawnedMonster dead, double now)
+    {
+        if (!dead.Hostile || !dead.HasCurses || dead.Life != 0) return;
+        const int radius = 30;
+        var at = dead.Walk.Position(now);
+        foreach (var mark in dead.Curses.All.Values.Where(c => c.Mark && c.TransferChance > 0 && c.Until > now).ToArray())
         {
-            string effect = SkillsFor(conn).EffectId(skill.Effect) ?? "";
-            if (!CurseCatalog.All.TryGetValue(effect, out var curse)) continue;
-            var gem = SupportedSkill(conn, skill.Id);
-            if (!gem.RequirementsMet) continue;
-            if (!curse.Mark && hextouch && source!.Host != 0 && gem.Host == source.Host && gem.Group == source.Group
-                && GolemStat(gem.Stats, "curse_triggered_by_hextouch") != 0)
-                ApplyCurseLocked(conn, target, skill.Id, now, false, gem, player);
-            if (curse.Mark && !spell && target.Rarity is MonsterRarity.Rare or MonsterRarity.Unique
-                && GolemStat(gem.Stats, "trigger_on_attack_hit_against_rare_or_unique") != 0
-                && now >= conn.SkillReadyAt.GetValueOrDefault(gem.Effect))
+            var owner = player.Id == mark.Caster ? player
+                : player.Instance.PlayersExcept(player.Id).OfType<Player>().FirstOrDefault(p => p.Id == mark.Caster);
+            if (owner is not { Closed: false, LeavingArea: false, PlayerLife: > 0 }
+                || !ReferenceEquals(player.Area, owner.Area)
+                || !RandomRolls.Chance(mark.TransferChance, 100, AreaRng(owner))) continue;
+            int limit = CurseLimit(owner, CharacterPlayerStats(owner));
+            if (limit < 1) continue;
+            foreach (var target in owner.Area.MonstersNear(at, radius).Select(entry => entry.Value)
+                .Where(m => m is { Hostile: true, Dead: false, Life: > 0, WorldHidden: false }
+                    && m.Mods.Effects[Stat.ImmuneToCurses] == 0)
+                .Select(m => (Monster: m, Distance: Dist(at, m.Walk.Position(now))))
+                .Where(candidate => candidate.Distance <= radius).OrderBy(candidate => candidate.Distance))
             {
-                if (!PayMana(conn, skill.Id, out _, out _)) continue;
-                conn.SkillReadyAt[gem.Effect] = now + 4;
-                ApplyCurseLocked(conn, target, skill.Id, now, false, gem, player);
+                var transferred = mark with { Applied = now, Buff = owner.NextBuff++ };
+                target.Monster.Curses.Put(transferred, limit);
+                if (!ReferenceEquals(target.Monster.Curses.All.GetValueOrDefault((mark.Caster, mark.Effect)), transferred)) continue;
+                dead.Curses.Remove(mark.Caster, mark.Effect);
+                dead.PresentationChanged?.Invoke();
+                target.Monster.PresentationChanged?.Invoke();
+                break;
             }
         }
     }
 
-    static async Task<bool> CastCurse(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
+    static void TemporalChainsOnSuccessfulHitLocked(Player owner, SpawnedMonster target, double now,
+        IReadOnlyDictionary<uint, int> casterStats, int chance, Random random, uint? casterId = null)
+    {
+        if (!RandomRolls.Chance(chance, 100, random)) return;
+        const string effect = "TemporalChains";
+        var curse = TemporalChainsOnHitStats.GetValue(SkillsFor(owner), static catalog =>
+            catalog.EffectStats(catalog.EffectRow(effect), 1).ToDictionary(p => p.Item1, p => p.Item2));
+        if (curse.Count != 0) ApplyCurseDataLocked(owner, target, 0, effect, curse, now, false, casterStats, casterId: casterId);
+    }
+
+    static void CursesOnHitLocked(Player player, SpawnedMonster target, ushort sourceSkill, bool spell, double now,
+        IReadOnlyDictionary<uint, int>? sourceStats, IReadOnlyDictionary<uint, int> hitStats, bool playerHit, Random random)
+    {
+        if (target.Dead || target.Life == 0 || player.Reservations.Secondary) return;
+        if (playerHit)
+        {
+            TemporalChainsOnSuccessfulHitLocked(player, target, now, hitStats,
+                hitStats.GetValueOrDefault(Stat.CurseOnHitPctTemporalChains), random);
+            ItemCursesOnHitLocked(player, target, hitStats, now);
+        }
+        bool mayHextouch = sourceSkill != 0
+            && (sourceStats is null || GolemStat(sourceStats, Stat.ApplyLinkedCursesOnHitPct) > 0);
+        if (!mayHextouch && (spell || target.Rarity is not (MonsterRarity.Rare or MonsterRarity.Unique))) return;
+        var source = mayHextouch ? SupportedSkill(player, sourceSkill) : null;
+        bool hextouch = source is not null && GolemStat(source.Stats, Stat.ApplyLinkedCursesOnHitPct) is var chance
+            && RandomRolls.Chance(chance, 100, AreaRng(player));
+        if (!hextouch && (spell || target.Rarity is not (MonsterRarity.Rare or MonsterRarity.Unique))) return;
+        var playerStats = CharacterPlayerStats(player);
+        foreach (var skill in GemSkillEffects(player))
+        {
+            string effect = SkillsFor(player).EffectId(skill.Effect) ?? "";
+            if (!CurseCatalog.All.TryGetValue(effect, out var curse)) continue;
+            var gem = SupportedSkill(player, skill.Id);
+            if (!gem.RequirementsMet) continue;
+            if (!curse.Mark && hextouch && source!.Host != 0 && gem.Host == source.Host && gem.Group == source.Group
+                && GolemStat(gem.Stats, Stat.CurseTriggeredByHextouch) != 0)
+                ApplyCurseLocked(player, target, skill.Id, now, false, gem, playerStats);
+            if (curse.Mark && !spell && target.Rarity is MonsterRarity.Rare or MonsterRarity.Unique
+                && GolemStat(gem.Stats, Stat.TriggerOnAttackHitAgainstRareOrUnique) != 0
+                && now >= player.SkillReadyAt.GetValueOrDefault(gem.Effect))
+            {
+                if (!PayMana(player, skill.Id, out uint manaCost, out uint lifeCost)) continue;
+                if (lifeCost > 0 || manaCost > 0)
+                {
+                    player.Frames.Area?.Life.Resend(player);
+                    if (player.ProjectileRuntime is { Active: true } session)
+                        session.Enqueue(() => SendSkillCost(player, lifeCost, "Mark on Hit cost"));
+                }
+                player.SkillReadyAt[gem.Effect] = now + 4;
+                ApplyCurseLocked(player, target, skill.Id, now, false, gem, playerStats);
+            }
+        }
+    }
+
+    static async Task<bool> CastCurse(Player player,
         ushort skill, (int X, int Y) aim, uint target, int recovery, Func<bool> current)
     {
-        var gem = SupportedSkill(conn, skill); string effect = SkillsFor(conn).EffectId(gem.Effect)!;
-        double release = AreaTime(conn) + (CastMs(conn, gem.Effect, skill) ?? 1000) / 1000d;
+        var gem = SupportedSkill(player, skill); string effect = SkillsFor(player).EffectId(gem.Effect)!;
+        PlayerSkillSource? source;
+        source = CurrentPlayerSkillSourceLocked(player, skill);
+        if (source is not { Active: true }) return false;
+        double release = AreaTime(player) + (CastMs(player, gem.Effect, skill) ?? 1000) / 1000d;
         var lifetime = CombatLifetime;
         while (true)
         {
-            lock (conn.Monsters)
+            if (!CurrentGameWork || !ReferenceEquals(lifetime, CombatLifetime) || !current() || player.Closed || player.LeavingArea
+                || player.PlayerLife == 0 || recovery != player.ActionInterruptionGeneration) return false;
+            if (!player.Paused && AreaTime(player) >= release)
             {
-                if (!CurrentGameWork || !ReferenceEquals(lifetime, CombatLifetime) || !current() || conn.Closed || conn.LeavingArea
-                    || conn.PlayerLife == 0 || recovery != conn.ActionInterruptionGeneration) return false;
-                if (!conn.Paused && AreaTime(conn) >= release)
-                {
-                    double now = AreaTime(conn); var player = CharacterPlayerStats(conn);
-                    var currentGem = SupportedSkill(conn, skill); int radius = CurseRadius(conn, skill, false, currentGem, player);
-                    foreach (var (id, m) in conn.Monsters)
-                        if (CurseCatalog.All[effect].Mark ? id == target : Dist(m.Walk.Position(now), aim) <= radius)
-                            ApplyCurseLocked(conn, m, skill, now, false, currentGem, player);
-                    break;
-                }
+                double now = AreaTime(player); var playerStats = CharacterPlayerStats(player);
+                var currentSource = CurrentPlayerSkillSourceLocked(player, skill);
+                var currentGem = SupportedSkill(player, skill);
+                if (currentSource is not { Active: true } || currentSource.Identity != source.Identity
+                    || currentGem.Effect != gem.Effect || !currentGem.RequirementsMet
+                    || GemSkillInstanceDisabled(player, currentGem.Effect, skill) is not null) return false;
+                RecordCompletedCurseCast(player, effect, AreaTime(player));
+                ApplyCurseTargetsLocked(player, skill, currentGem, CurseCatalog.All[effect], aim, target, now, playerStats);
+                break;
             }
             await AreaWait(PlayerUpdateRole.Minions, 25);
         }
-        await EnemyDebuffsTick(remote, stream, ciphers, conn, AreaTime(conn));
+        await EnemyDebuffsTick(player, AreaTime(player));
         return true;
     }
 
-    static void CursesTickLocked(ClientState conn, double now, List<byte> bytes)
+    static void ApplyCurseTargetsLocked(Player player, ushort skill, SupportedGem gem, CurseCatalog.Definition curse,
+        (int X, int Y) aim, uint target, double now, IReadOnlyDictionary<uint, int> playerStats)
     {
-        var active = conn.Auras.Values.Where(a => CurseCatalog.Hex(a.EffectId) && !ExternalTemporalChains(conn, a.EffectId)).ToArray();
-        var player = active.Length > 0 ? CharacterPlayerStats(conn) : null;
-        var auras = active.TakeLast(player is null ? 0 : CurseLimit(conn, player))
-            .Select(a => (Aura: a, Gem: SupportedSkill(conn, a.SkillId)))
-            .Select(a => (a.Aura, a.Gem, Radius: CurseRadius(conn, a.Aura.SkillId, true, a.Gem, player))).ToArray();
-        var here = conn.Walk.Position(now);
-        foreach (var (id, m) in conn.Monsters)
+        if (curse.Mark)
         {
-            foreach (var curse in m.Curses.All.Values.Where(c => c.Mark && (m.Dead || m.Life == 0 || c.Caster == conn.PeerId && conn.PlayerLife == 0)).ToArray())
-                m.Curses.Remove(curse.Caster, curse.Effect);
-            foreach (var curse in m.Curses.All.Values.Where(c => c.Caster == conn.PeerId && c.Aura).ToArray())
-                if (conn.PlayerLife == 0 || m.Dead || !auras.Any(a => a.Aura.SkillId == curse.Skill && Dist(m.Walk.Position(now), here) <= a.Radius))
+            if (player.Area.Monsters.GetValueOrDefault(target) is { } marked)
+                ApplyCurseLocked(player, marked, skill, now, false, gem, playerStats);
+            return;
+        }
+        int radius = CurseRadius(player, skill, false, gem, playerStats);
+        foreach (var monster in player.Area.Monsters.Values)
+            if (Dist(monster.Walk.Position(now), aim) <= radius)
+                ApplyCurseLocked(player, monster, skill, now, false, gem, playerStats);
+    }
+
+    static bool IsHexblastEffect(string? effect) => effect is "Hexblast" or "HexblastAltX" or "HexblastAltY";
+
+    static MonsterCurses.Curse? HexblastHex(SpawnedMonster monster, double now)
+    {
+        MonsterCurses.Curse? chosen = null;
+        foreach (var curse in monster.Curses.All.Values)
+            if (!curse.Mark && curse.Until > now && (chosen is null || curse.Until < chosen.Until))
+                chosen = curse;
+        return chosen;
+    }
+
+    static void ConsumeHexblastHex(Player player, uint id, SpawnedMonster monster, MonsterCurses.Curse curse)
+    {
+        monster.Curses.Remove(curse.Caster, curse.Effect);
+        if (monster.Curses.Presented.Remove((curse.Caster, curse.Effect), out var presented))
+            player.Area.Buffs.Clear(id, presented.Row, presented.Caster, tag: presented.Buff);
+    }
+
+    static bool WitchbaneImmunityActive(Player player, double now) =>
+        player.PlayerLife > 0 && player.WitchbaneImmunityUntil > now;
+
+    static void WitchbaneOnKill(Player player, SpawnedMonster target, double now)
+    {
+        double until = target.NonAuraHexUntilAtDeath;
+        if (until <= Math.Max(now, player.WitchbaneImmunityUntil) || player.PlayerLife == 0
+            || StatSourceValues(player).GetValueOrDefault(Stat.ImmuneToCursesOnKillingCursedEnemyForRemainingDurationOfCurse) == 0)
+            return;
+        player.WitchbaneImmunityUntil = until;
+        if (HasMapHexes(MapModsOf(player))) RecomputePoolsAndSpeed(player);
+        MarkPlayerStats(player, PlayerStatStep.Sources);
+        MarkPlayerStats(player, PlayerStatStep.SelfVulnerability);
+        player.AuraStatsDirty = true;
+    }
+
+    // A curse aura of the player (Blasphemy): its gem and radius, the zone's (EnemyDebuffs.Rules' CurseZone).
+    record struct CurseAura(AuraCatalog.Aura Aura, SupportedGem Gem, int Radius);
+
+    // The player's curse auras now, within the curse limit, and the stats their curses read.
+    static CurseAura[] CurseAuras(Player player, out IReadOnlyDictionary<uint, int>? playerStats)
+    {
+        var active = player.Auras.Values.Where(a => CurseCatalog.Hex(a.EffectId) && !ExternalTemporalChains(player, a.EffectId)).ToArray();
+        var stats = active.Length > 0 ? CharacterPlayerStats(player) : null;
+        playerStats = stats;
+        return [.. active.TakeLast(stats is null ? 0 : CurseLimit(player, stats))
+            .Select(a => (Aura: a, Gem: SupportedSkill(player, a.SkillId)))
+            .Select(a => new CurseAura(a.Aura, a.Gem, CurseRadius(player, a.Aura.SkillId, true, a.Gem, stats)))];
+    }
+
+    // One monster's curses: a mark ends with its monster or caster, a curse aura's with its zone (inAura), and what
+    // changed is shown.
+    static void StepCursesLocked(Player player, CurseAura[] auras, IReadOnlyDictionary<uint, int>? playerStats, uint id, SpawnedMonster m,
+        double now, Func<ushort, bool> inAura)
+    {
+        bool hasCurses = m.HasCurses;
+        if (hasCurses || auras.Length > 0)
+        {
+            bool dead = m.Dead || m.Life == 0;
+            if (hasCurses && m.Curses.All.Count > 0)
+            {
+                foreach (var curse in m.Curses.All.Values.Where(c => c.Mark
+                    && (dead && !c.RemainsOnDeath || c.Caster == player.Id && player.PlayerLife == 0)).ToArray())
                     m.Curses.Remove(curse.Caster, curse.Effect);
-            if (conn.PlayerLife > 0 && !InTown(conn))
+                foreach (var curse in m.Curses.All.Values.Where(c => c.Caster == player.Id && c.Aura).ToArray())
+                    if (player.PlayerLife == 0 || dead || !auras.Any(a => a.Aura.SkillId == curse.Skill && inAura(a.Aura.SkillId)))
+                        m.Curses.Remove(curse.Caster, curse.Effect);
+            }
+            if (auras.Length > 0 && player.PlayerLife > 0 && !InTown(player))
                 foreach (var aura in auras)
-                    if (Dist(m.Walk.Position(now), here) <= aura.Radius) ApplyCurseLocked(conn, m, aura.Aura.SkillId, now, true, aura.Gem, player);
-            m.Curses.Expire(now);
-            var changed = m.Curses.Presented.Values.Where(c => !m.Curses.All.TryGetValue((c.Caster, c.Effect), out var next) || next.Buff != c.Buff).ToArray();
-            foreach (var old in changed)
-            { bytes.AddRange(InstanceEntities.RemoveBuff(id, old.Buff)); m.Curses.Presented.Remove((old.Caster, old.Effect)); }
-            foreach (var curse in m.Curses.All.Values.Where(c => !m.Curses.Presented.ContainsKey((c.Caster, c.Effect))))
+                    if (inAura(aura.Aura.SkillId)) ApplyCurseLocked(player, m, aura.Aura.SkillId, now, true, aura.Gem, playerStats);
+            if (m.HasCurses)
             {
-                bytes.AddRange(InstanceEntities.AddBuff(id, curse.Buff, curse.Row, PlayerId, curse.Skill,
-                    u68: double.IsFinite(curse.Until) ? BitConverter.SingleToUInt32Bits((float)Math.Max(0, curse.Until - now)) : null));
-                m.Curses.Presented[(curse.Caster, curse.Effect)] = curse;
-            }
-            double slow = m.Rarity is MonsterRarity.Rare or MonsterRarity.Unique
-                ? m.Curses["temporal_chains_action_speed_+%_vs_rare_or_unique_final"] : m.Curses["temporal_chains_action_speed_+%_final"];
-            if (!ExternalTemporalChains(conn, "TemporalChains"))
-            {
-                double oldRate = m.RecipientDebuffRate;
-                double rate = RecipientEffectTime.Rate(2, n => m.Effects[n]);
-                if (rate != oldRate)
+                if (m.Curses.All.Count > 0)
                 {
-                    SettleBleeding(m, now);
-                    m.Ignites.SetExpiryRate(now, rate); m.Poisons.SetExpiryRate(now, rate); m.Ailments.SetExpiryRate(now, rate);
-                    m.TauntedUntil = RecipientEffectTime.RetimedDeadline(m.TauntedUntil, now, oldRate, rate); m.RecipientDebuffRate = rate;
-                    m.Ruptures.SetExpiryRate(now, rate);
-                    m.Bleeds.SetExpiryRate(now, BleedingExpiryRate(m, now));
+                    m.Curses.Expire(now);
+                    var effects = m.Effects;
+                    int Get(uint key) => effects[key];
+                    m.Curses.Retime(now, RecipientEffectTime.Rate(5, Get), RecipientEffectTime.Rate(5, Get, temporalChains: true));
                 }
-                m.ReceivedActionFactor = Math.Max(BossMods.SlowestActionFactor(m.Variety), 1 + slow / 100); m.ReceivedActionUntil = slow != 0 ? double.PositiveInfinity : now;
+                bool Visible(MonsterCurses.Curse curse) => !dead || !m.CorpseConsumed && curse.RemainsOnDeath;
+                if (m.Curses.Presented.Count > 0)
+                {
+                    var changed = m.Curses.Presented.Values.Where(c => !m.Curses.All.TryGetValue((c.Caster, c.Effect), out var next)
+                        || next.Buff != c.Buff || next.Until != c.Until || !Visible(next)).ToArray();
+                    foreach (var old in changed)
+                    { player.Area.Buffs.Clear(id, old.Row, old.Caster, tag: old.Buff); m.Curses.Presented.Remove((old.Caster, old.Effect)); }
+                }
+                // A curse is its caster's; each application its own buff (its tag), so a renewed curse restarts its countdown.
+                if (m.Curses.All.Count > 0)
+                    foreach (var curse in m.Curses.All.Values)
+                    {
+                        if (!Visible(curse) || m.Curses.Presented.ContainsKey((curse.Caster, curse.Effect))) continue;
+                        player.Area.Buffs.Set(id, new(curse.Row, curse.Caster, curse.Skill, Tag: curse.Buff,
+                            U68: double.IsFinite(curse.Until) ? Buff.Seconds(curse.Until - now) : null));
+                        m.Curses.Presented[(curse.Caster, curse.Effect)] = curse;
+                    }
             }
-            if (m.Curses.PresentedVersion != m.Curses.Version)
+        }
+        bool anyActiveCurse = m.HasCurses && m.Curses.All.Count > 0;
+        double slow = !anyActiveCurse ? 0
+            : m.Rarity is MonsterRarity.Rare or MonsterRarity.Unique
+                ? m.Curses[Stat.TemporalChainsActionSpeedPlusPctVsRareOrUniqueFinal] : m.Curses[Stat.TemporalChainsActionSpeedPlusPctFinal];
+        if (!ExternalTemporalChains(player, "TemporalChains"))
+        {
+            double oldRate = m.RecipientDebuffRate;
+            double rate;
+            if (!anyActiveCurse && m.EncounterStats is null && m.BuffStats is null && m.TemporaryStats.Count == 0 && ReferenceEquals(m.Mods, MonsterModSet.None))
+                rate = 1;
+            else
             {
-                var keys = m.Curses.PresentedStats.Concat(m.Curses.Stats.Keys).Distinct().ToArray();
-                bytes.AddRange(InstanceEntities.StatsUpdate(id, keys.Select(n => (Key: Stats.Key(n), Value: m.Effects[n]))
-                    .Where(p => p.Key is not null).Select(p => (p.Key!.Value, p.Value)).ToList()));
-                m.Curses.PresentedStats.Clear(); m.Curses.PresentedStats.UnionWith(m.Curses.Stats.Keys);
-                m.Curses.PresentedVersion = m.Curses.Version;
+                var effects = m.Effects;
+                rate = RecipientEffectTime.Rate(2, n => effects[n]);
             }
+            if (rate != oldRate)
+            {
+                SettleBleeding(m, now);
+                m.Ignites.SetExpiryRate(now, rate); m.Poisons.SetExpiryRate(now, rate); m.Ailments.SetExpiryRate(now, rate);
+                m.Decay.SetExpiryRate(now, rate);
+                m.RuleAilments.SetExpiryRate(now, rate);
+                m.SpiderWebs.SetExpiryRate(now, rate);
+                m.TauntedUntil = RecipientEffectTime.RetimedDeadline(m.TauntedUntil, now, oldRate, rate); m.RecipientDebuffRate = rate;
+                m.Ruptures.SetExpiryRate(now, rate);
+                m.Bleeds.SetExpiryRate(now, BleedingExpiryRate(m, now));
+            }
+            // SlowestActionFactor is <= 1, so when slow == 0 (no Temporal Chains), Max(floor, 1) is always 1.
+            m.ReceivedActionFactor = slow == 0 ? 1 : Math.Max(BossMods.SlowestActionFactor(m.Variety), 1 + slow / 100);
+            m.ReceivedActionUntil = slow != 0 ? double.PositiveInfinity : now;
+        }
+        if (m.HasCurses && m.Curses.PresentedVersion != m.Curses.Version)
+        {
+            var keys = m.Curses.PresentedStats.Concat(m.Curses.Stats.Keys).Distinct().ToArray();
+            var effects = m.Effects;
+            SetStats(player, id, keys.Where(StatCatalog.IsClientId)
+                .Select(n => (n, effects[n] + SpiderRecipientStat(m, n, now))));
+            m.Curses.PresentedStats.Clear(); m.Curses.PresentedStats.UnionWith(m.Curses.Stats.Keys);
+            m.Curses.PresentedVersion = m.Curses.Version;
         }
     }
 }

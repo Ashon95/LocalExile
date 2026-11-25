@@ -31,7 +31,7 @@ public class FleshAndStoneAuraTests
         var together = AuraCatalog.Bonus([haste, stronger], 0, skills, Program.Stats);
         Assert.Equal(Math.Max(own.AttackSpeedPct, external.AttackSpeedPct), together.AttackSpeedPct);
         Assert.Equal(Math.Max(own.MovementVelocityPct, external.MovementVelocityPct), together.MovementVelocityPct);
-        uint cast = Program.Stats.Key("cast_speed_+%")!.Value;
+        uint cast = Stat.CastSpeedPlusPct;
         Assert.Equal(30, AuraCatalog.RawStats([haste, stronger], 0, skills, Program.Stats).Single(p => p.Key == cast).Value);
     }
 
@@ -47,7 +47,7 @@ public class FleshAndStoneAuraTests
 
         int reduction = AuraCatalog.FleshAndStoneDamageReduction(sand, 0, skills, Program.Stats);
         Assert.NotEqual(0, reduction);
-        uint? takenKey = Program.Stats.Key("base_damage_taken_+%");
+        uint? takenKey = Stat.BaseDamageTakenPlusPct;
         Assert.NotNull(takenKey);
         var sandStats = AuraCatalog.RawStats([sand], 0, skills, Program.Stats).ToDictionary(x => x.Key, x => x.Value);
         Assert.DoesNotContain(takenKey!.Value, sandStats.Keys); // An enemy-distance reduction is never a global reduced-taken stat.
@@ -67,5 +67,57 @@ public class FleshAndStoneAuraTests
         monster.PridePhysicalMore = 20;
         Assert.Equal(180, Game.MonsterTakesMitigated(monster, physical, spell: false));
         Assert.Equal(1.2, Game.MonsterDotTaken(monster, DamageType.Physical)); // Flesh and Stone affects hits only.
+    }
+
+    [Fact]
+    public async Task Blood_and_Sand_and_Flesh_and_Stone_can_coexist_switch_and_cancel_without_key_collision()
+    {
+        using var f = new TriggeredSummonTests.Fixture();
+        var c = f.Player;
+        c.Connection.PlayerObjectCreated = true;
+        c.Pools = new(80, 5000, 5000, 0, 0, Strength: 500, Dexterity: 500, Intelligence: 500);
+        c.PlayerLife = 5000;
+        c.PlayerMana = 5000;
+        f.Equip(("Blood and Sand", 1), ("Flesh and Stone", 1));
+
+        var skills = Game.GemSkillEffects(c).ToArray();
+        var bloodAndSand = skills.Single(s => Program.Skills.EffectId(s.Effect) == "BloodAndSand");
+        var fleshAndStone = skills.Single(s => Program.Skills.EffectId(s.Effect) == "FleshAndStone");
+
+        Assert.True(Game.TryPlanStanceLocked(c, bloodAndSand.Id, bloodAndSand.Effect, 0, out var bloodPlan));
+        Game.ApplyStancePlanLocked(c, bloodAndSand.Id, bloodPlan!, ++c.ActionCount, c.ProjectileEpoch);
+        Assert.True(Game.TryPlanStanceLocked(c, fleshAndStone.Id, fleshAndStone.Effect, 0, out var fleshPlan));
+        Game.ApplyStancePlanLocked(c, fleshAndStone.Id, fleshPlan!, ++c.ActionCount, c.ProjectileEpoch);
+
+        // Both auras share Blood/Sand BuffDefinitions rows (1308/1309) and must publish without duplicate AreaBuffs keys.
+        Game.WithOwnAuraRecords(c, () => [], replay: true);
+        c.Area.Buffs.Publish();
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneBloodRow, c.Id, tag: 0));
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneBloodRow, c.Id, tag: (ushort)BuffTag.BloodAndSand));
+
+        // Toggling to Sand Stance (1309) replaces both rows cleanly.
+        Assert.True(Game.TryPlanStanceLocked(c, bloodAndSand.Id, bloodAndSand.Effect, 1, out var sandPlan));
+        Game.ApplyStancePlanLocked(c, bloodAndSand.Id, sandPlan!, ++c.ActionCount, c.ProjectileEpoch);
+        Assert.Equal(StanceCatalog.SandSelection, c.Stance);
+        Game.WithOwnAuraRecords(c, () => [], replay: true);
+        c.Area.Buffs.Publish();
+        Assert.False(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneBloodRow, c.Id, tag: 0));
+        Assert.False(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneBloodRow, c.Id, tag: (ushort)BuffTag.BloodAndSand));
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, tag: 0));
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, tag: (ushort)BuffTag.BloodAndSand));
+
+        // Right-clicking Blood and Sand's buff cancels only Blood and Sand's tagged buffs while keeping Flesh and Stone intact.
+        ushort bloodInstance = Enumerable.Range(1, 200)
+            .Select(i => (ushort)i)
+            .First(i => c.Area.Buffs.Find(c.Id, i) is { Row: AuraCatalog.FleshAndStoneSandRow, Tag: (ushort)BuffTag.BloodAndSand });
+        Game.LoadBuffCancelData();
+        Assert.True(await Game.CancelRemovableBuff(c, bloodInstance));
+        c.Area.Buffs.Publish();
+        Assert.False(c.Auras.ContainsKey(bloodAndSand.Id));
+        Assert.True(c.Auras.ContainsKey(fleshAndStone.Id));
+        Assert.False(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, tag: (ushort)BuffTag.BloodAndSand));
+        Assert.False(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, auraSource: true, tag: (ushort)BuffTag.BloodAndSand));
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, tag: 0));
+        Assert.True(c.Area.Buffs.Has(c.Id, AuraCatalog.FleshAndStoneSandRow, c.Id, auraSource: true, tag: 0));
     }
 }

@@ -20,6 +20,13 @@ static class Act3Monsters
     public const string Piety = "Metadata/Monsters/Axis/PietyBoss";                         // 1421, The Lunaris Temple
     public const string Dominus = "Metadata/Monsters/Pope/Pope";                            // 1678 Dominus, High Templar (mapboss2)
     public const string DominusAscendant = "Metadata/Monsters/Dominusdemon/Dominusdemon";   // 1688, his second form
+    public static readonly string[] DominusLegionnaires =
+        ["Metadata/Monsters/Axis/AxisEliteSoldierBoss1", "Metadata/Monsters/Axis/AxisEliteSoldierBoss2",
+         "Metadata/Monsters/Axis/AxisCasterBoss1"];
+    public const string Alal = "Metadata/Monsters/DemonFemale/DemonFemaleBoss1";
+    public const string Kali = "Metadata/Monsters/DemonModular/DemonFemaleRangedBoss1";
+    public const string Orcus = "Metadata/Monsters/DemonModular/DemonModularBoss1";
+    public static readonly string[] DominusMiscreations = [Alal, Kali, Orcus];
 }
 
 /// <summary>BaseItemTypes Ids of Act 3's quest items (rows in brackets).</summary>
@@ -41,7 +48,8 @@ static class Act3Items
 /// <summary>Act 3's quest objects, chests and out-of-town NPCs.</summary>
 static class Act3Objects
 {
-    public const string ClarissaSlums = "Metadata/NPC/Act3/ClarissaSlums", TolmanChair = "Metadata/Chests/QuestChests/Tolman/TolmanChair";
+    public const string ClarissaSlums = "Metadata/NPC/Act3/ClarissaSlums", ClarissaTown = "Metadata/NPC/Act3/ClarissaTown",
+        TolmanChair = "Metadata/Chests/QuestChests/Tolman/TolmanChair";
     public const string SewerGrating = "Metadata/QuestObjects/Sewers/SewersLockedDoor";
     public static readonly string[] Stashes =
         ["Metadata/Chests/QuestChests/Victario/Stash1", "Metadata/Chests/QuestChests/Victario/Stash2", "Metadata/Chests/QuestChests/Victario/Stash3"];
@@ -57,7 +65,8 @@ static class Act3Objects
     public static readonly string[] BookStands =
         ["Metadata/Chests/QuestChests/Siosa/GoldenBookStand1", "Metadata/Chests/QuestChests/Siosa/GoldenBookStand2",
          "Metadata/Chests/QuestChests/Siosa/GoldenBookStand3", "Metadata/Chests/QuestChests/Siosa/GoldenBookStand4"];
-    public const string Fairgraves = "Metadata/NPC/Act3/Fairgraves";
+    public const string Fairgraves = "Metadata/NPC/Act3/Fairgraves",
+        FairgravesFigurehead = "Metadata/NPC/Act3/FairgravesFigurehead";
     public const string DecanterChest = "Metadata/Chests/QuestChests/Fairgraves/DecanterChest", PlumTree = "Metadata/Chests/QuestChests/Fairgraves/FruitTree";
     public const string EpicDoorLock = "Metadata/QuestObjects/EpicDoor/EpicDoorLock", EpicDoor = "Metadata/QuestObjects/EpicDoor/EpicDoor",
         EpicDoorBlocker = "Metadata/QuestObjects/EpicDoor/EpicDoorBlocker";
@@ -82,12 +91,14 @@ static class Act3Objects
         ReturnPortal = "Metadata/Terrain/Labyrinth/Objects/LabyrinthAirlockPortal",
         PlazaDoor = "Metadata/Terrain/Labyrinth/Objects/LabyrinthAirlockDoor", Plaza = "Labyrinth_Airlock";
     public static readonly string PlazaDoorOpen = LabyrinthDay.PlazaDoorOpen;
-    /// <summary>The Ascendancy Chamber behind Izaro's last arena (boss_ascendancy.arm in each Normal FinalBoss area): its
+    /// <summary>The Ascendancy Chamber behind Izaro's last arena (boss_ascendancy.arm in each FinalBoss area): its
     /// portal out of the Labyrinth (to town, as the plaza's) and the font (a tile record, StatueLionBase), which awards the
     /// Labyrinth's points and opens the class selector.</summary>
     public const string ChamberPortal = "Metadata/Terrain/Labyrinth/Objects/LabyrinthReturnPortal",
         AscendancyFont = "Metadata/Terrain/Labyrinth/Objects/LabyrinthAscendancyDevice";
     public const string Chamber1 = "1_Labyrinth_boss_1_end", Chamber2 = "1_Labyrinth_boss_2_end", Chamber3 = "1_Labyrinth_boss_3_end_#";
+    public const string CruelChamber1 = "2_Labyrinth_boss_1_end", CruelChamber2 = "2_Labyrinth_boss_2_end",
+        CruelChamber3 = "2_Labyrinth_boss_3_end_#";
 }
 
 /// <summary>
@@ -112,8 +123,9 @@ sealed class Act3 : Act
                 On.Npc(CityOfSarn, Act3Objects.ClarissaSlums, goneWith: "a3q1-RescuedGirl", freedBy: Act3Monsters.GuardCaptain),
                 On.Near(Slums, Act3Objects.ClarissaSlums, "a3q1-SeenGirl"),
                 On.Npc(Slums, Act3Objects.ClarissaSlums, goneWith: "a3q1-RescuedGirl", freedBy: Act3Monsters.GuardCaptain),
+                On.Npc(SarnEncampment, Act3Objects.ClarissaTown, null, shownBy: "a3q1-RescuedGirl"),
                 On.Seen(Crematorium, Act3Monsters.PietyEscape, "a3q2-SeenPiety"),
-                On.Threshold(Crematorium, Act3Monsters.PietyEscape, 50, Act3Objects.PietyFled),
+                On.Threshold(Crematorium, Act3Monsters.PietyEscape, 50, Act3Objects.PietyFled, "AudioEventDrivenOffPiety"),
                 new ChestRule(Crematorium, Act3Objects.TolmanChair, Act3Items.TolmansBracelet, Act3Objects.PietyFled)
                 {
                     Guards = ["Metadata/Monsters/Axis/AxisEliteSoldierGuardTolman", "Metadata/Monsters/Axis/AxisCasterGuardTolman",
@@ -202,7 +214,10 @@ sealed class Act3 : Act
             // reward (offer 25) is magic and rare rings.
             new Quest("a3q13")
             {
-                On.Npc(Docks, Act3Objects.Fairgraves, goneWith: null, shownBy: "a1q6-KilledFairgraves"),
+                On.Npc(Docks, Act3Objects.Fairgraves, goneWith: null, shownBy: "a1q6-KilledFairgraves", transitionedBy: "AudioEventFairgraves2Dead"),
+                On.Exists(Act3Objects.FairgravesFigurehead, from: "a1q6-KilledFairgraves"),
+                On.Object(Docks, Act3Objects.FairgravesFigurehead, "AudioEventFairgraves2Dead"),
+                On.TalkRow(502, "a3q13-FairgravesFarewell"),
                 // Row 496 (both items carried) takes both in that click, as online; the data's rows 497 and 498 would take
                 // them one click each.
                 On.HandIn(Act3Objects.Fairgraves, "A Swig of Hope", Act3Items.Plum, row: 496),
@@ -242,6 +257,12 @@ sealed class Act3 : Act
                 On.Object(Act3Objects.Chamber1, Act3Objects.AscendancyFont),
                 On.Object(Act3Objects.Chamber2, Act3Objects.AscendancyFont),
                 On.Object(Act3Objects.Chamber3, Act3Objects.AscendancyFont),
+                On.Object(Act3Objects.CruelChamber1, Act3Objects.ChamberPortal),
+                On.Object(Act3Objects.CruelChamber2, Act3Objects.ChamberPortal),
+                On.Object(Act3Objects.CruelChamber3, Act3Objects.ChamberPortal),
+                On.Object(Act3Objects.CruelChamber1, Act3Objects.AscendancyFont),
+                On.Object(Act3Objects.CruelChamber2, Act3Objects.AscendancyFont),
+                On.Object(Act3Objects.CruelChamber3, Act3Objects.AscendancyFont),
             },
             new Quest("a3q10")
             {
@@ -250,6 +271,14 @@ sealed class Act3 : Act
                 On.Object(ImperialGardens, Act3Objects.EpicDoor, "a3q9-UsedTowerKey"),
                 On.Blocker(ImperialGardens, Act3Objects.EpicDoorBlocker, 4, "a3q9-UsedTowerKey"),
                 On.Exit(ImperialGardens, SceptreOfGod, "a3q9-UsedTowerKey"),
+                // The three tower legionnaires precede the three miscreations, then Dominus forms at mapboss2.
+                On.Forms(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires, Act3Monsters.Alal, "mapboss3"),
+                On.Forms(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires, Act3Monsters.Kali, "mapboss4"),
+                On.Forms(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires, Act3Monsters.Orcus, "mapboss5"),
+                On.Forms(UpperSceptreOfGod, Act3Monsters.DominusMiscreations, Act3Monsters.Dominus, "mapboss2"),
+                On.Seen(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires[0], "a3q10-DominusFightStarted"),
+                On.Seen(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires[1], "a3q10-DominusFightStarted"),
+                On.Seen(UpperSceptreOfGod, Act3Monsters.DominusLegionnaires[2], "a3q10-DominusFightStarted"),
                 On.Seen(UpperSceptreOfGod, Act3Monsters.Dominus, "a3q10-DominusFightStarted", "a3q10-SeenDominus"),
                 On.SecondForm(UpperSceptreOfGod, Act3Monsters.Dominus, Act3Monsters.DominusAscendant),
                 On.Killed(UpperSceptreOfGod, Act3Monsters.DominusAscendant, "a3q10-KilledDominus", "a3q10-SeenDialla"),

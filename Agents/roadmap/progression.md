@@ -35,10 +35,20 @@ Items keep the Roadmap's priority groups, and are in rough priority order within
   accuracy roll; close range is the constant 20-unit radius).
   Minions' Accuracy equals yours is not offered by that target group and remains unsupported with minion accuracy.
   Gem attacks still need their own accuracy rolls before these target conditions can affect them.
+- **Passive masteries:** the defence, attribute and equipment effects work ([Status](../status/progression.md)).
+  **Next**, each needs its mechanic first:
+  recovery on an event (Flask6, Warcry2, Recovery1, Poison5, Curse6, Staff1, Trap5, Fortify1, ArmourEnergyShield2);
+  damage-taken modifiers (EnergyShield2, DamageOverTime4, Fortify6, Fortify3, Curse2, Elemental3, Lightning6);
+  chaos damage against ES (EnergyShield5); a "taken damage recently" event (Evasion3); timed regeneration
+  (ArmourEvasion4, EvasionEnergyShield6, Recovery3, Recovery5); stationary armour (Armour5); ES recharge timing
+  (ArmourEnergyShield4, EvasionEnergyShield4); "defend with armour" (ArmourEnergyShield1, ArmourEvasion1); and the
+  offence effects that read the hit's target (Bleeding4, Criticals2/6, Dagger1, Stun3, Lightning2, TwoHand2, Claw3,
+  Axe5, Chaos5, Leech3, Dagger4) or a skill family (Banner, Link, Mark, Mine, Trap, Impale, Retaliation, Warcry).
+  IDs are PassiveSkillMasteryEffects rows. Totem2 and the Projectile speed effects are in open PRs (#1163, #1151).
 - **Known:** pinned ordinary/Phrecia topology is available as
   [read-only analysis artifacts](../docs/dev/passive-graph-data.md), without installing a client graph.
 - **Known:** existing Phrecia capabilities and node sources are extracted into `Modules/Legacy/PhreciaAscendancies`.
-  Its league composition is independent of Idols; the latter has client data but no gameplay implementation.
+  Its league composition is independent of Idols, which are their own module ([Idols](../docs/game/idols.md)).
   Behemoth now supplies its descriptor and sources with generation-bound shared Rampage/Vaal engines.
   Whisperer supplies its exact descriptor and generic Mana/Recoup/Blind consumers after the actual Behemoth merge.
   **Next:** review and replay Whisperer's reconciled current-main candidate, then adapt the remaining class PRs.

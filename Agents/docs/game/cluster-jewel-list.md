@@ -157,7 +157,7 @@ The theme is the stat every small passive of a cluster jewel grants. The client 
 | **Exposure Therapy** | +5% to Damage over Time Multiplier; +30% Chaos Resistance against Damage Over Time | partial (1/2 stats read); conditional |
 | **Eye of the Storm** | 40% increased Global Critical Strike Chance; +10% to Damage over Time Multiplier for Ignite from Critical Strikes; 20% increased Effect of non-Damaging Ailments you inflict with Critical Strikes | partial (1/3 stats read); conditional |
 | **Eye to Eye** | 25% increased Projectile Damage; Projectiles deal 35% increased Damage with Hits against nearby Enemies | partial (1/2 stats read) |
-| **Fan of Blades** | Attack Skills fire an additional Projectile while wielding a Claw or Dagger; 20% increased Projectile Attack Damage with Claws or Daggers | inert (no stat read); conditional |
+| **Fan of Blades** | Attack Skills fire an additional Projectile while wielding a Claw or Dagger; 20% increased Projectile Attack Damage with Claws or Daggers | implemented ([20](../protocol/20-damage.md) §2b) |
 | **Fan the Flames** | Ignites you inflict spread to other Enemies within a Radius of 1.5 metres | inert (no stat read) |
 | **Fasting** | 20% increased Flask Charges gained; 10% increased Movement Speed while under no Flask Effects | inert (no stat read); conditional |
 | **Fearsome Warrior** | Attacks with Two Handed Melee Weapons deal 25% increased Damage with Hits and Ailments; 8% increased Area of Effect; 25% chance to Intimidate nearby Enemies for 4 seconds on Melee Kill | partial (1/3 stats read); conditional |
@@ -298,7 +298,7 @@ The theme is the stat every small passive of a cluster jewel grants. The client 
 | **Snaring Spirits** | 30% increased Totem Damage; Totems Hinder Enemies near them when Summoned | inert (no stat read); conditional |
 | **Snowstorm** | Gain 8% of Lightning Damage as Extra Cold Damage against Chilled Enemies | inert (no stat read) |
 | **Special Reserve** | Regenerate 120% of Life per second during any Flask Effect; 20% increased Damage during any Flask Effect | inert (no stat read); conditional |
-| **Spiked Concoction** | 100% chance to gain Alchemist's Genius when you use a Flask; 5% increased Attack and Cast Speed during any Flask Effect | inert (no stat read); conditional |
+| **Spiked Concoction** | 100% chance to gain Alchemist's Genius when you use a Flask; 5% increased Attack and Cast Speed during any Flask Effect | grants the buff on a flask use; conditional |
 | **Spring Back** | 10% increased maximum Energy Shield; 5% faster start of Energy Shield Recharge | works |
 | **Volatile Presence** | Anger has 50% increased Mana Reservation Efficiency; 20% increased Duration of Fire Ailments | partial (1/2 stats read) |
 | **Steady Torment** | +6% to Damage over Time Multiplier for Bleeding you inflict on Poisoned Enemies; +6% to Damage over Time Multiplier for Poison you inflict on Bleeding Enemies; 15% increased Bleeding Duration; 15% increased Poison Duration | inert (no stat read) |

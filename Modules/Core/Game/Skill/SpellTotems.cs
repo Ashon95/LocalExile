@@ -6,185 +6,370 @@ using GameServer.Core.Projectiles;
 
 public static partial class Game
 {
-    internal static bool NativeProjectileTotem(ClientState conn, int effect) => SkillsFor(conn).EffectId(effect) == "HolyFlameTotem";
+    internal static bool NativeProjectileTotem(Player player, int effect) =>
+        GatewayProjectileSkillProfiles.IsHolyFlameTotem(SkillsFor(player).EffectId(effect));
+    sealed class TotemChannel { public bool Active; public ushort Sequence; }
+    static readonly RuleTable<TotemState.Totem, TotemChannel> TotemChannels = new();
     static readonly RuleTable<TotemState.Totem, SupportedGem> TotemSources = new();
-    public static bool SpellTotemEffect(ClientState conn, int effect) => SkillsFor(conn).IsSpell(effect)
-        && !SkillsFor(conn).IsAttack(effect) && !SkillsFor(conn).IsTravel(effect)
+    public static bool SpellTotemEffect(Player player, int effect) => SkillsFor(player).IsSpell(effect)
+        && !SkillsFor(player).IsAttack(effect) && !SkillsFor(player).IsTravel(effect)
         && Supports.Of(effect)?.Types.Contains(47) != true
-        && (TotemSummon(conn, effect) is not null || GolemData.Find(SkillsFor(conn).EffectId(effect)) is not null
-            || (SkillsFor(conn).EffectId(effect) == "Arc" || UsesProjectileRuntime(effect) && ResolveProjectileDefinition(effect) is not null)
-                && SkillHitPlan.ForSkill(SkillsFor(conn), effect, 1).CanHit);
+        && (TotemSummon(player, effect) is not null || GolemData.Find(SkillsFor(player).EffectId(effect)) is not null
+            || CurseCatalog.All.ContainsKey(SkillsFor(player).EffectId(effect) ?? "")
+            || (SkillsFor(player).EffectId(effect) == "Arc" || IsAbsolutionHitSpell(player, effect) || SpellTotemNova(player, effect)
+                || UsesProjectileRuntime(effect) && ResolveProjectileDefinition(effect) is not null)
+                && SkillHitPlan.ForSkill(SkillsFor(player), effect, 1).CanHit);
 
-    static SummonCatalog.Definition? TotemSummon(ClientState conn, int effect) =>
-        SummonData.Find(SkillsFor(conn).EffectId(effect)) is { Family: not "Clone", Id: not "AnimateWeaponAltX" } summon ? summon : null;
-    static bool SameTotemSource(SupportedGem a, SupportedGem b) => a.Host == b.Host && a.Group == b.Group
+    static bool SpellTotemNova(Player player, int effect) => SkillsFor(player).EffectId(effect) is "IceNova" or "IceNovaAltY";
+
+    static SummonCatalog.Definition? TotemSummon(Player player, int effect) =>
+        SummonData.Find(SkillsFor(player).EffectId(effect)) is { Family: not "Clone", Id: not "AnimateWeaponAltX" } summon ? summon : null;
+    static bool SameLinkedSkillSource(SupportedGem a, SupportedGem b) => a.Host == b.Host && a.Group == b.Group
         && a.Effect == b.Effect && a.Quality == b.Quality
-        && a.SourceGem is not null && b.SourceGem is not null
-        && ReferenceEquals(PlayerInventories.GemIdentity(a.SourceGem), PlayerInventories.GemIdentity(b.SourceGem))
+        && (a.WornGrant is { } worn ? b.WornGrant == worn && b.RequirementsMet
+            : a.SourceGem is not null && b.SourceGem is not null
+                && ReferenceEquals(PlayerInventories.GemIdentity(a.SourceGem), PlayerInventories.GemIdentity(b.SourceGem)))
         && a.Supports.Select(s => (s.Gem.Effect, s.Gem.Socket, s.Gem.Quality))
             .SequenceEqual(b.Supports.Select(s => (s.Gem.Effect, s.Gem.Socket, s.Gem.Quality)));
-    public static void BindTotemSource(ClientState conn, TotemState.Totem totem)
+    public static void BindTotemSource(Player player, TotemState.Totem totem)
     {
-        TotemSources.Remove(totem); TotemSources.Add(totem, SupportedSkill(conn, totem.SkillId));
+        TotemSources.Remove(totem); TotemSources.Add(totem, SupportedSkill(player, totem.SkillId));
     }
 
     public static Dictionary<uint, int> TotemCasterStats(IReadOnlyDictionary<uint, int> owner)
     {
         var caster = new Dictionary<uint, int>(owner);
         // Only owner-only prohibitions are bypassed. Gruthkul's spell prohibition still belongs to the spell.
-        foreach (string name in new[] { "keystone_ancestral_bond", "deal_no_damage_yourself" })
-            if (Stats.Key(name) is uint key) caster.Remove(key);
+        foreach (uint name in new[]
+        {
+            Stat.KeystoneAncestralBond, Stat.DealNoDamageYourself,
+            Stat.RecoverPctMaximumLifeWhenCursingNonCursedEnemy, Stat.RecoverPctMaximumManaWhenCursingNonCursedEnemy,
+        })
+            caster.Remove(name);
         // Arcane Surge is a buff on the owner, not on his totems: its more Spell Damage stays his.
-        if (Stats.Key(ArcaneSurgeSpellMore) is uint arcane) caster.Remove(arcane);
+        if (ArcaneSurgeSpellMore is var arcane) caster.Remove(arcane);
+        // "Gain Arcane Surge when you deal a Critical Strike": the owner's critical strikes, not his totems'.
+        caster.Remove(Stat.GainArcaneSurgeOnCritPctChance);
+        // "Curse Enemies with <Hex> on Hit" is the owner's hits too.
+        foreach (var (stat, _) in ItemCurseOnHitStats) caster.Remove(stat);
         return caster;
     }
 
-    public static double? TotemCastSeconds(ClientState conn, ushort skill)
+    public static double? TotemCastSeconds(Player player, ushort skill)
     {
-        var gem = SupportedSkill(conn, skill);
-        if (SkillsFor(conn).IsAttack(gem.Effect)) return TotemAttackSeconds(conn, skill);
-        var stats = MergeSkillStats(CharacterPlayerStats(conn), gem.Stats);
-        int Get(string name) => Stats.Key(name) is uint key ? stats.GetValueOrDefault(key) : 0;
+        var gem = SupportedSkill(player, skill);
+        if (SkillsFor(player).IsAttack(gem.Effect)) return TotemAttackSeconds(player, skill);
+        var stats = MergeSkillStats(CharacterPlayerStats(player), gem.Stats);
+        int Get(uint key) => stats.GetValueOrDefault(key);
         // is_totem describes the placement skill. The proxy casts the underlying spell with its support penalty.
-        int Read(string name) => name == "is_totem" ? 0 : Get(name);
+        int Read(uint name) => name == Stat.IsTotem ? 0 : Get(name);
         // The owner's Arcane Surge cast speed is his buff's, not the totem's.
-        var owner = CharacterPlayerStats(conn);
-        int speed = FinalCastSpeedPct(Read, () => HoldingFishingRod(conn),
-            CastSpeedPct(owner) - GolemStat(owner, "arcane_surge_cast_speed_+%")
-            + GolemStat(gem.Stats, "base_cast_speed_+%") + Get("totem_skill_cast_speed_+%"));
-        return SpellCastTiming.ForSkill(SkillsFor(conn), gem.Effect, speed)?.DurationMilliseconds is int ms
+        var owner = CharacterPlayerStats(player);
+        int speed = FinalCastSpeedPct(Read, () => HoldingFishingRod(player),
+            CastSpeedPct(owner) - GolemStat(owner, Stat.ArcaneSurgeCastSpeedPlusPct)
+            + GolemStat(gem.Stats, Stat.BaseCastSpeedPlusPct) + Get(Stat.TotemSkillCastSpeedPlusPct));
+        return SpellCastTiming.ForSkill(SkillsFor(player), gem.Effect, speed)?.DurationMilliseconds is int ms
             ? Math.Max(TickSeconds, ms / 1000d) : null;
     }
 
-    public static GrantedSkill? TotemProxy(ClientState conn, ushort skill)
+    public static GrantedSkill? TotemProxy(Player player, ushort skill)
     {
-        var gem = SupportedSkill(conn, skill);
+        var gem = SupportedSkill(player, skill);
         var payload = new Dictionary<uint, int>(gem.Stats);
-        foreach (string name in new[] { "is_totem", "base_skill_is_totemified", "skill_is_totemified" })
-            if (Stats.Key(name) is uint key) payload[key] = 0;
-        foreach (var (name, value) in new[] { ("uses_no_mana", 1), ("mana_cost", 0),
-            ("base_spell_cast_time_ms", SkillsFor(conn).CastTimeMs(gem.Effect)),
-            ("virtual_base_spell_cast_time_ms", SkillsFor(conn).CastTimeMs(gem.Effect)) })
-            if (Stats.Key(name) is uint key) payload[key] = value;
-        if (!SkillsFor(conn).IsAttack(gem.Effect) && TotemCastSeconds(conn, skill) is double seconds && Stats.Key("cast_speed_+%") is uint speed)
-            payload[speed] = (int)Math.Round(100 * (SkillsFor(conn).CastTimeMs(gem.Effect) / (seconds * 1000) - 1));
-        if (SkillsFor(conn).IsAttack(gem.Effect))
+        foreach (uint name in new[] { Stat.IsTotem, Stat.BaseSkillIsTotemified, Stat.SkillIsTotemified })
+            payload[name] = 0;
+        foreach (var (name, value) in new[] { (Stat.UsesNoMana, 1), (Stat.ManaCost, 0),
+            (Stat.BaseSpellCastTimeMs, SkillsFor(player).CastTimeMs(gem.Effect)),
+            (Stat.VirtualBaseSpellCastTimeMs, SkillsFor(player).CastTimeMs(gem.Effect)) })
+            if (name is var key) payload[key] = value;
+        // A totem never walks. Without this the client sends a server-driven action through its own walk-into-range
+        // step, which drops it (11 §"skill_is_non_pathing"): the totem stood still and its spell drew nothing.
+        payload[Stat.SkillIsNonPathing] = 1;
+        if (SpellTotemNova(player, gem.Effect))
+            payload[Stat.ActiveSkillAreaOfEffectRadius] = SkillRadius(player, gem.Stats, spell: true, gem.Effect);
+        else if (CurseCatalog.Hex(SkillsFor(player).EffectId(gem.Effect)))
+            payload[Stat.ActiveSkillAreaOfEffectRadius] = CurseRadius(player, skill, aura: false, gem);
+        if (!SkillsFor(player).IsAttack(gem.Effect) && TotemCastSeconds(player, skill) is double seconds && Stat.CastSpeedPlusPct is var speed)
+            payload[speed] = (int)Math.Round(100 * (SkillsFor(player).CastTimeMs(gem.Effect) / (seconds * 1000) - 1));
+        if (SkillsFor(player).IsAttack(gem.Effect))
         {
-            foreach (var (key, value) in WeaponStats(conn, WeaponFor(conn), CharacterPlayerStats(conn))) payload[key] = value;
-            double attackSeconds = TotemAttackSeconds(conn, skill);
-            payload[StatKeys.MainHandAttackSpeedPct] = (int)Math.Round(100 * (WeaponFor(conn).AttackMs / (attackSeconds * 1000) - 1));
-            payload[StatKeys.HundredTimesAttacksPerSecond] = (int)Math.Round(100 / attackSeconds);
-            if (Stats.Key("main_hand_weapon_type") is uint weaponType)
-                payload[weaponType] = WeaponTypeStats.Of(ActiveMainHand(conn)?.Type?.Class);
+            foreach (var (key, value) in WeaponStats(player, WeaponFor(player), CharacterPlayerStats(player))) payload[key] = value;
+            double attackSeconds = TotemAttackSeconds(player, skill);
+            payload[Stat.MainHandAttackSpeedPlusPct] = (int)Math.Round(100 * (WeaponFor(player).AttackMs / (attackSeconds * 1000) - 1));
+            payload[Stat.HundredTimesAttacksPerSecond] = (int)Math.Round(100 / attackSeconds);
+            if (Stat.MainHandWeaponType is var weaponType)
+                payload[weaponType] = WeaponTypeStats.Of(ActiveMainHand(player)?.Type?.Class);
         }
-        var proxy = SkillsFor(conn).FindByRow(0x4000, gem.Effect, gem.Level, [.. payload.Select(p => (p.Key, p.Value))]);
-        return proxy is null ? null : proxy with { Parent = (PlayerId, skill) };
+        var proxy = SkillsFor(player).FindByRow(0x4000, gem.Effect, gem.Level, [.. payload.Select(p => (p.Key, p.Value))]);
+        return proxy is null ? null : proxy with { Parent = (player.Id, skill) };
     }
 
-    public static bool SpellTotemCurrent(ClientState conn, TotemState.Totem totem)
+    public static bool SpellTotemCurrent(Player player, TotemState.Totem totem)
     {
-        if (!CurrentGameWork || conn.Closed || conn.LeavingArea || conn.PlayerLife == 0
-            || !totem.Alive(conn.Clock.Elapsed.TotalSeconds)) return false;
-        var source = GemSkillEffects(conn).FirstOrDefault(g => g.Id == totem.SkillId);
+        if (!CurrentGameWork || player.Closed || player.LeavingArea || player.PlayerLife == 0
+            || !totem.Alive(AreaTime(player))) return false;
+        var source = GemSkillEffects(player).FirstOrDefault(g => g.Id == totem.SkillId);
         return source.Name is not null && source.Effect == totem.Effect && source.Gem == totem.SourceGem
-            && SupportedSkill(conn, totem.SkillId) is var supported && supported.Host == totem.SourceHost
+            && SupportedSkill(player, totem.SkillId) is var supported && supported.Host == totem.SourceHost
             && supported.SourceGem is not null && totem.SourceItem is not null
             && ReferenceEquals(PlayerInventories.GemIdentity(supported.SourceGem), PlayerInventories.GemIdentity(totem.SourceItem))
-            && (!TotemSources.TryGetValue(totem, out var captured) || SameTotemSource(captured, supported))
-            && GemSkillInstanceDisabled(conn, totem.Effect, totem.SkillId) is null
-            && TotemPathAvailable(conn, totem.SkillId, totem.Effect)
-            && IsTotemSkill(conn, totem.SkillId);
+            && (!TotemSources.TryGetValue(totem, out var captured) || SameLinkedSkillSource(captured, supported))
+            && GemSkillInstanceDisabled(player, totem.Effect, totem.SkillId) is null
+            && TotemPathAvailable(player, totem.SkillId, totem.Effect)
+            && IsTotemSkill(player, totem.SkillId);
     }
 
-    public static void TickSpellTotemsLocked(string remote, NetworkStream stream, ConnectionCiphers ciphers,
-        ClientState conn, List<byte> bytes)
+    public static void TickSpellTotemsLocked(Player player, List<byte> bytes)
     {
-        var records = new WorldRecordBuilder(conn, null);
-        TickSpellTotemsLocked(remote, stream, ciphers, conn, records);
+        var records = new WorldRecordBuilder(player, null);
+        TickSpellTotemsLocked(player, records);
         bytes.AddRange(records.Bytes());
     }
 
-    static void TickSpellTotemsLocked(string remote, NetworkStream stream, ConnectionCiphers ciphers,
-        ClientState conn, WorldRecordBuilder bytes)
+    static bool SpellTotemTargetable(Player player, uint id, SpawnedMonster monster) =>
+        TotemTargetable(monster) && !MonsterAsleep(player, id) && !monster.WorldHidden && !ArenaHazards.Untargetable(player, monster);
+
+    static (int X, int Y) NonZeroTotemAim((int X, int Y) origin, (int X, int Y) aim) =>
+        aim == origin ? (origin.X + 1, origin.Y) : aim;
+
+    static void StopTotemChannel(TotemState.Totem totem, WorldRecordBuilder bytes)
     {
-        double now = conn.Clock.Elapsed.TotalSeconds;
-        foreach (var totem in conn.Totems.Living(now).Where(t => t.Effect >= 0).ToArray())
+        if (TotemChannels.TryGetValue(totem, out var channel) && channel.Active)
         {
-            if (!SpellTotemCurrent(conn, totem)) { totem.DiedAt = now; continue; }
-            if (conn.Paused || now < totem.NextCast) continue;
-            // A lockstep client's totem exists from the end of the frame its create is written in: no order before that.
-            if (conn.LockstepClient && !conn.WorldOutput.PublishedObject(totem.Id).IsReady) continue;
-            double range = TotemTargetRange(conn, totem.SkillId);
-            var gem = GemSkillEffects(conn).First(g => g.Id == totem.SkillId);
-            var summon = TotemSummon(conn, gem.Effect);
-            var golem = GolemData.Find(SkillsFor(conn).EffectId(gem.Effect));
-            var target = conn.Monsters.Where(p => p.Value is { Hostile: true, Dead: false, Life: > 0 }
-                && Dist(p.Value.Walk.Position(now), totem.At) <= range)
-                .OrderBy(p => Dist(p.Value.Walk.Position(now), totem.At)).FirstOrDefault();
-            if (target.Value is null && summon is null && golem is null
-                || TotemCastSeconds(conn, totem.SkillId) is not double seconds) continue;
-            var aim = target.Value?.Walk.Position(now) ?? totem.At;
-            uint summonTarget = 0;
-            if (summon?.Corpse == true)
+            channel.Active = false;
+            bytes.World(totem.Id, InstanceProtocol.ChannelFinished(totem.Id, channel.Sequence));
+        }
+    }
+
+    static (uint Id, SpawnedMonster? Monster, (int X, int Y) Pos) PickSpellTotemTarget(
+        Player player, TotemState.Totem totem, double range, double now, bool preferSight)
+    {
+        double rangeSq = range * range;
+        uint bestId = 0;
+        SpawnedMonster? bestMonster = null;
+        (int X, int Y) bestPos = default;
+        long bestDistSq = long.MaxValue;
+        int count = 0;
+        foreach (var p in player.Area.MonstersNear(totem.At, range))
+        {
+            if (!SpellTotemTargetable(player, p.Key, p.Value)) continue;
+            var pos = p.Value.Walk.Position(now);
+            long dx = pos.X - totem.At.X, dy = pos.Y - totem.At.Y;
+            long distSq = dx * dx + dy * dy;
+            if (distSq > rangeSq) continue;
+            count++;
+            if (distSq < bestDistSq)
             {
-                if (SummonCorpse(conn, totem.At, 0, range) is not { } corpse) continue;
-                summonTarget = conn.Monsters.First(p => ReferenceEquals(p.Value, corpse)).Key;
+                bestId = p.Key;
+                bestMonster = p.Value;
+                bestPos = pos;
+                bestDistSq = distSq;
+            }
+        }
+        if (bestMonster is null) return default;
+        if (!preferSight || count <= 1) return (bestId, bestMonster, bestPos);
+        var session = ProjectilesFor(player);
+        var origin = ProjectileSession.Vector(totem.At);
+        if (session.TraceTerrain(origin, ProjectileSession.Vector(bestPos)) is null)
+            return (bestId, bestMonster, bestPos);
+        var others = new List<(uint Id, SpawnedMonster Monster, (int X, int Y) Pos, long DistSq)>(count - 1);
+        foreach (var p in player.Area.MonstersNear(totem.At, range))
+        {
+            if (p.Key == bestId || !SpellTotemTargetable(player, p.Key, p.Value)) continue;
+            var pos = p.Value.Walk.Position(now);
+            long dx = pos.X - totem.At.X, dy = pos.Y - totem.At.Y;
+            long distSq = dx * dx + dy * dy;
+            if (distSq <= rangeSq) others.Add((p.Key, p.Value, pos, distSq));
+        }
+        others.Sort((a, b) => a.DistSq.CompareTo(b.DistSq));
+        for (int i = 0; i < others.Count; i++)
+        {
+            var candidate = others[i];
+            if (session.TraceTerrain(origin, ProjectileSession.Vector(candidate.Pos)) is null)
+                return (candidate.Id, candidate.Monster, candidate.Pos);
+        }
+        return (bestId, bestMonster, bestPos);
+    }
+
+    static void TickSpellTotemsLocked(Player player, WorldRecordBuilder bytes)
+    {
+        double now = AreaTime(player);
+        foreach (var totem in player.Totems.Living(now).Where(t => t.Effect >= 0).ToArray())
+        {
+            if (!SpellTotemCurrent(player, totem))
+            {
+                totem.DiedAt = now;
+                player.RemoveBlocker(totem.Id);
+                StopTotemChannel(totem, bytes);
+                TotemChannels.Remove(totem);
+                MarkPlayerStats(player, PlayerStatStep.TotemAura);
+                PresentNearby(player);
+                continue;
+            }
+            if (player.Paused || now < totem.NextCast) continue;
+            // A lockstep client's totem exists from the end of the frame its create is written in: no order before that.
+            if (player.Connection.LockstepClient && !player.Connection.WorldOutput.PublishedObject(totem.Id).IsReady) continue;
+            double range = TotemTargetRange(player, totem.SkillId);
+            var gem = GemSkillEffects(player).First(g => g.Id == totem.SkillId);
+            bool warchief = SkillsFor(player).EffectId(gem.Effect) == VaalAncestralWarchiefEffect;
+            if (warchief && !VaalWarchiefInRange(player, totem, now)) continue;
+            var summon = TotemSummon(player, gem.Effect);
+            var golem = GolemData.Find(SkillsFor(player).EffectId(gem.Effect));
+            bool nova = SpellTotemNova(player, gem.Effect);
+            bool nativeChannel = NativeProjectileTotem(player, gem.Effect);
+            var target = PickSpellTotemTarget(player, totem, range, now, preferSight: !nova && summon is null && golem is null);
+            if (target.Monster is null && summon is null && golem is null
+                || TotemCastSeconds(player, totem.SkillId) is not double seconds)
+            {
+                if (nativeChannel) StopTotemChannel(totem, bytes);
+                continue;
+            }
+            var aim = nova || target.Monster is null ? totem.At : target.Pos;
+            if (!nova && summon is null && golem is null) aim = NonZeroTotemAim(totem.At, aim);
+            uint summonTarget = 0;
+            if (summon is { Corpse: true } && SummonNeedsCorpse(summon, PlayerStatValues(player)))
+            {
+                var spell = SupportedSkill(player, totem.SkillId);
+                if (SummonCorpse(player, totem.At, 0, range,
+                    GolemStat(spell.Stats, Stat.CannotUseSpectreCorpses) != 0) is not { } corpse) continue;
+                summonTarget = player.Area.Monsters.First(p => ReferenceEquals(p.Value, corpse)).Key;
                 aim = corpse.Walk.Position(now);
             }
             else if (summon?.Family is "AnimatedWeapon" or "AnimatedGuardian")
             {
-                if (AnimatedItems(conn, summon, SupportedSkill(conn, totem.SkillId), totem.At, 0, null, range) is not { } source
-                    || source.Ground is null && conn.Summons.Fighters.Values.Any(g => g.Definition.Kind == summon.Family && !g.Monster.Dead)) continue;
+                if (AnimatedItems(player, summon, SupportedSkill(player, totem.SkillId), totem.At, 0, null, range) is not { } source
+                    || source.Ground is null && player.Summons.Fighters.Values.Any(g => g.Definition.Kind == summon.Family && !g.Monster.Dead)) continue;
                 summonTarget = source.Id;
                 aim = source.Ground is { } item ? (item.GridX, item.GridY) : totem.At;
             }
-            if (CooldownForSkill(conn, totem.SkillId) is { } cooldown)
+            if (CooldownForSkill(player, totem.SkillId) is { } cooldown)
             {
                 totem.Cooldown ??= new(now, cooldown.RecoveryRate);
-                if (!totem.Cooldown.TryUse(now, cooldown)) continue;
+                if (!totem.Cooldown.TryUse(now, cooldown))
+                {
+                    if (nativeChannel) StopTotemChannel(totem, bytes);
+                    continue;
+                }
             }
-            var session = ProjectilesFor(remote, stream, ciphers, conn);
+            var session = ProjectilesFor(player);
             ushort sequence = ++totem.Sequence;
             totem.NextCast = now + seconds;
-            bool arc = SkillsFor(conn).EffectId(gem.Effect) == "Arc";
+            string effect = SkillsFor(player).EffectId(gem.Effect) ?? "";
+            bool arc = effect == "Arc";
+            var curse = CurseCatalog.All.GetValueOrDefault(effect);
             bytes.World(totem.Id, InstanceProtocol.ActionStarted(totem.Id, totem.At.X, totem.At.Y, aim.X, aim.Y,
-                0x4000, sequence, 0x0408, targetObjectId: arc ? target.Key : null));
+                0x4000, sequence, player.MonsterOrderFlags, targetObjectId: arc || curse?.Mark == true ? target.Id : null));
+            if (nativeChannel)
+            {
+                var channel = TotemChannels.GetValue(totem, static _ => new());
+                channel.Active = true;
+                channel.Sequence = sequence;
+            }
             var lifetime = CombatLifetime;
+            if (warchief)
+            {
+                session.Runtime.Schedule(Math.Max(session.Runtime.Now, ProjectileRuntime.Time(totem.NextCast)), () =>
+                {
+                    if (session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem))
+                        ReleaseVaalWarchiefSlam(player, session, totem, aim, sequence);
+                });
+                continue;
+            }
             if (summon is not null || golem is not null)
             {
                 session.Runtime.Schedule(Math.Max(session.Runtime.Now, ProjectileRuntime.Time(totem.NextCast)), () =>
                 {
-                    bool Current() => session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(conn, totem);
+                    bool Current() => session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem);
                     if (!Current()) return;
                     session.Enqueue(async () =>
                     {
                         if (!Current()) return;
                         if (summon is not null)
-                            await CastSummon(remote, stream, ciphers, conn, totem.SkillId, summon, aim,
-                                summonTarget, conn.ActionInterruptionGeneration, Current, triggered: true, playerConsumesCorpse: false);
-                        else await CastGolem(remote, stream, ciphers, conn, totem.SkillId, golem!, aim,
-                            conn.ActionInterruptionGeneration, Current, triggered: true);
+                            await CastSummon(player, totem.SkillId, summon, aim,
+                                summonTarget, player.ActionInterruptionGeneration, Current, triggered: true, playerConsumesCorpse: false);
+                        else await CastGolem(player, totem.SkillId, golem!, aim,
+                            player.ActionInterruptionGeneration, Current, triggered: true);
                     });
                 });
                 continue;
             }
-            if (arc)
+            bool rain = totem.Ballista && BallistaRain(player, gem.Effect);
+            if (arc || nova || curse is not null)
             {
                 session.Runtime.Schedule(Math.Max(session.Runtime.Now, ProjectileRuntime.Time(totem.NextCast)), () =>
                 {
-                    if (session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(conn, totem)
-                        && conn.Monsters.GetValueOrDefault(target.Key) == target.Value)
-                        ReleaseArcTotem(conn, session, totem, target.Key, sequence);
+                    if (!session.Active || !ReferenceEquals(lifetime, CombatLifetime) || !SpellTotemCurrent(player, totem))
+                        return;
+                    if (curse is not null)
+                    {
+                        if (curse.Mark && player.Area.Monsters.GetValueOrDefault(target.Id) != target.Monster) return;
+                        double releasedAt = session.Runtime.Now / (double)ProjectileRuntime.QuantaPerSecond;
+                        var linked = SupportedSkill(player, totem.SkillId);
+                        var caster = TotemCasterStats(CharacterPlayerStats(player));
+                        ApplyCurseTargetsLocked(player, totem.SkillId, linked, curse, aim, target.Id, releasedAt, caster);
+                        session.Enqueue(() => EnemyDebuffsTick(player, releasedAt));
+                    }
+                    else if (nova)
+                    {
+                        int radius = SkillRadius(player, SupportedSkill(player, totem.SkillId).Stats, spell: true, gem.Effect);
+                        ReleaseTotemNova(player, session, totem, radius, sequence, SkillArtVariation(player, gem.Gem));
+                    }
+                    else if (player.Area.Monsters.GetValueOrDefault(target.Id) == target.Monster)
+                        ReleaseArcTotem(player, session, totem, target.Id, sequence);
                 });
                 continue;
             }
+            if (IsAbsolutionHitSpell(player, gem.Effect))
+            {
+                var spell = SupportedSkill(player, totem.SkillId);
+                int radius = SkillRadius(player, spell.Stats, spell: true, gem.Effect);
+                session.Runtime.Schedule(Math.Max(session.Runtime.Now, ProjectileRuntime.Time(totem.NextCast)), () =>
+                {
+                    if (session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem))
+                        TotemNovaLocked(player, session, totem, aim, radius, sequence, hitSummon: true);
+                });
+                continue;
+            }
+            uint targetId = target.Id;
+            SpawnedMonster? targetMonster = target.Monster;
+            var initialAim = aim;
+            (int X, int Y) ReleaseAim()
+            {
+                if (targetMonster is null
+                    || !player.Area.Monsters.TryGetValue(targetId, out var live) || !ReferenceEquals(live, targetMonster)
+                    || !SpellTotemTargetable(player, targetId, live)) return initialAim;
+                double releaseNow = session.Runtime.Now / (double)ProjectileRuntime.QuantaPerSecond;
+                var livePos = live.Walk.Position(releaseNow);
+                return Dist(livePos, totem.At) <= range ? NonZeroTotemAim(totem.At, livePos) : initialAim;
+            }
+
+            if (rain)
+            {
+                session.Runtime.Schedule(Math.Max(session.Runtime.Now, ProjectileRuntime.Time(totem.NextCast)), () =>
+                {
+                    if (session.Active && ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem))
+                        ReleaseArrowRain(session, totem.SkillId, gem, ReleaseAim(),
+                            CaptureSkillCriticalRoll(player, totem.SkillId), sequence,
+                            mirage: false, transform: null, podDamageFactor: 1, totem: totem);
+                });
+                continue;
+            }
+            if (totem.Ballista && IsBarrageGem(SkillsFor(player).EffectId(gem.Effect)))
+            {
+                ScheduleBarrage(player, session, totem.SkillId, gem.Effect, now, seconds, sequence,
+                    () => ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem),
+                    _ => ClientDrawnVolley(player, session, totem.SkillId, gem,
+                        CaptureGemProjectile(player, session, totem.SkillId, gem, ReleaseAim(),
+                            CaptureSkillCriticalRoll(player, totem.SkillId), sequence, totem: totem), sequence, 0));
+                continue;
+            }
             session.Schedule(ProjectileRuntime.Time(totem.NextCast),
-                () => ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(conn, totem),
+                () => ReferenceEquals(lifetime, CombatLifetime) && SpellTotemCurrent(player, totem),
                 () =>
                 {
-                    var use = CaptureGemProjectile(conn, session, totem.SkillId, gem, aim,
-                        CaptureSkillCriticalRoll(conn, totem.SkillId), sequence, totem: totem);
-                    return ClientDrawnVolley(conn, session, totem.SkillId, gem, use, sequence, 0);
+                    var use = CaptureGemProjectile(player, session, totem.SkillId, gem, ReleaseAim(),
+                        CaptureSkillCriticalRoll(player, totem.SkillId), sequence, totem: totem);
+                    return ClientDrawnVolley(player, session, totem.SkillId, gem, use, sequence, 0);
                 });
         }
     }

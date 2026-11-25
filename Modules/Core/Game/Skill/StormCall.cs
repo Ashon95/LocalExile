@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using GameServer.Core.Projectiles;
 using GameServer.Core.Protocol.Instance;
 using GameServer.Core.Protocol.Login;
 
@@ -16,125 +17,244 @@ public static partial class Game
 
     const double StormCallImpactArtSeconds = 1.5;
 
-    static (string? Loop, string? Impact, int Variation) StormCallArt(ClientState conn, uint gem)
+    static (string? Loop, string? Impact, int Variation) StormCallArt(Player player, uint gem)
     {
-        int variation = SkillArtVariation(conn, gem);
-        return (Art.Animated("storm_call_loop", variation) ?? Art.Animated("storm_call_loop", 0),
-            Art.Animated("storm_call_impact", variation) ?? Art.Animated("storm_call_impact", 0), variation);
+        int variation = SkillArtVariation(player, gem);
+        var (loop, impact) = StormCallArt(variation);
+        return (loop, impact, variation);
     }
 
-    sealed record StormCallUse(SkillCriticalRoll? Critical, SacrificeUse Sacrifice, double DamageMore);
+    // The skin's marker and impact art (MiscAnimatedArtVariations), the base skin's where the skin has none.
+    static (string? Loop, string? Impact) StormCallArt(int variation) =>
+        (Art.Animated("storm_call_loop", variation) ?? Art.Animated("storm_call_loop", 0),
+            Art.Animated("storm_call_impact", variation) ?? Art.Animated("storm_call_impact", 0));
 
-    public static async Task PlaceStormCall(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
+    /// <summary>The impact art's scale for a strike of the radius (cells): the art drawn at the area's size.</summary>
+    public static float AreaArtScale(double radius, string art) => (float)(radius * (250.0 / 23) / (Art.ArtRadius(art) ?? 250));
+
+    /// <summary>Storm Call as any caster's skill plays it (a monster's: BossKits.Shaped): a marker that strikes after the
+    /// skill's duration (base_skill_effect_duration with its own duration modifiers) and calls down the caster's other
+    /// markers with it, in the skill_art_variation skin.</summary>
+    public static MonsterDelayedStrike? StormCallStrikeOf(SkillCatalog catalog, int effect, byte level)
+    {
+        var stats = GolemData.Skill(catalog, effect, level).Stats;
+        int Get(uint key) => stats.GetValueOrDefault(key);
+        if (Get(Stat.BaseSkillEffectDuration) <= 0) return null;
+        var (loop, impact) = StormCallArt(Get(Stat.SkillArtVariation));
+        return new(SkillDurationModifiers.Seconds(Get(Stat.BaseSkillEffectDuration), _ => 0, Get), loop, impact,
+            StormCallImpactArtSeconds, StrikesTogether: true);
+    }
+
+    sealed record StormCallUse(SkillCriticalRoll? Critical, SacrificeUse Sacrifice, double DamageMore, IntensityCast? Intensity);
+    internal sealed record PlacedStormCallUse(PlacedAreaHit Placement, Func<bool> Current, string? Loop, string? Impact);
+
+    public static async Task PlaceStormCall(Player player,
         ushort skillId, (ushort Id, int Effect, string Name, int Level, int Quality, uint Gem) gem, (int X, int Y) at,
         int repeat, int? actionToken, CooldownUseTicket? cooldownUse, SkillCriticalRoll? criticalRoll, SacrificeUse sacrifice,
         double sealDelay = 0, double damageMore = 1)
     {
-        int? castMs = CastMs(conn, gem.Effect, skillId);
+        int? castMs = CastMs(player, gem.Effect, skillId);
         if (castMs is null) return;
-        bool TokenCurrent() => cooldownUse?.Current(conn) ?? (actionToken is null || conn.ActionCount == actionToken);
+        bool TokenCurrent() => cooldownUse?.Current(player) ?? (actionToken is null || player.ActionCount == actionToken);
         double delay;
-        lock (conn.Monsters)
-            delay = sealDelay + castMs.Value / 1000.0 * (repeat + Animations.SpellAreaRelease(SkillsFor(conn).ClassFor(conn.ClassRow).AnimatedObject));
-        await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.05, delay)));
-        await WhilePaused(conn);
-        if (conn.Closed || !TokenCurrent()) return;
-        var own = SupportedSkill(conn, skillId).Stats;
-        var player = CharacterPlayerStats(conn);
-        int Own(string key) => Stats.Key(key) is uint k ? own.GetValueOrDefault(k) : 0;
-        int Player(string key) => Stats.Key(key) is uint k ? player.GetValueOrDefault(k) : 0;
-        double duration = SkillDurationModifiers.Seconds(Own("base_skill_effect_duration"), Player, Own);
-        int radius = SkillRadius(conn, own, spell: true, gem.Effect);
-        var (loop, _, variation) = StormCallArt(conn, gem.Gem);
+        delay = sealDelay + castMs.Value / 1000.0 * (repeat + Animations.SpellAreaRelease(SkillsFor(player).ClassFor(player.Character.ClassRow).AnimatedObject));
+        await AreaDelay(player, Math.Max(0.05, delay));
+        await WhilePaused(player);
+        await PlaceStormCallMarker(player, skillId, gem, at, repeat, criticalRoll, sacrifice, damageMore, TokenCurrent);
+    }
+
+    static async Task TriggerStormCall(Player player, ushort skillId,
+        (ushort Id, int Effect, string Name, int Level, int Quality, uint Gem) gem, (int X, int Y) aim,
+        (int X, int Y)? origin, SkillCriticalRoll critical, SacrificeUse sacrifice, Func<bool> current)
+    {
+        if (!current()) return;
+        var from = origin ?? player.Walk.Position(AreaTime(player));
+        var areas = SpellCascadeAreas(player, gem.Effect, SupportedSkill(player, skillId).Stats, from, aim);
+        await PlaceStormCallMarker(player, skillId, gem, aim, 0, critical, sacrifice, 1, current);
+        foreach (var area in areas)
+            await PlaceStormCallMarker(player, skillId, gem, area, 0, critical, sacrifice, 1, current);
+    }
+
+    static async Task PlaceStormCallMarker(Player player, ushort skillId,
+        (ushort Id, int Effect, string Name, int Level, int Quality, uint Gem) gem, (int X, int Y) at, int repeat,
+        SkillCriticalRoll? criticalRoll, SacrificeUse sacrifice, double damageMore, Func<bool> current)
+    {
+        if (player.Closed || player.LeavingArea || player.PlayerLife == 0 || !current()) return;
+        var own = SupportedSkill(player, skillId).Stats;
+        var playerStats = CharacterPlayerStats(player);
+        int Own(uint k) => own.GetValueOrDefault(k);
+        int Player(uint k) => playerStats.GetValueOrDefault(k);
+        double duration = SkillDurationModifiers.Seconds(Own(Stat.BaseSkillEffectDuration), Player, Own);
+        int radius = SkillRadius(player, own, spell: true, gem.Effect);
+        var (loop, _, variation) = StormCallArt(player, gem.Gem);
         StormCallMarkers.Marker marker;
-        bool paid = false;
-        lock (conn.Monsters)
-        {
-            if (!TokenCurrent() || !sacrifice.Current) return;
-            double now = conn.Clock.Elapsed.TotalSeconds;
-            marker = new(conn.TakeObjectId(), skillId, at, now + duration, repeat, conn.ProjectileEpoch,
-                sacrifice.AddedChaos(() => paid = true), new StormCallUse(criticalRoll, sacrifice, damageMore));
-            conn.StormCall.Place(marker);
-        }
-        if (paid) await Send(remote, stream, ciphers, [], null, atGate: sacrifice.LifePacket);
-        Console.WriteLine($"[gateway] {remote} storm call marker 0x{marker.Object:x} at ({at.X}, {at.Y}), repeat {repeat}, "
+        if (!current() || !sacrifice.Current) return;
+        double now = AreaTime(player);
+        var intensity = CastingIntensity(player, skillId);
+        marker = new(player.TakeObjectId(), skillId, at, now + duration, repeat, player.ProjectileEpoch,
+            sacrifice.AddedChaos(), new StormCallUse(criticalRoll, sacrifice, damageMore, intensity));
+        var markers = player.StormCall;
+        lock (markers) markers.Place(marker);
+        intensity?.Complete();
+        Console.WriteLine($"[gateway] {player.Connection.Remote} storm call marker 0x{marker.Object:x} at ({at.X}, {at.Y}), repeat {repeat}, "
             + $"strikes in {duration:0.00}s, radius {radius}; skin variation {variation}: art {loop ?? "none"}");
         if (loop is not null)
         {
-            await Send(remote, stream, ciphers, InstanceEntities.CreateObject(marker.Object,
+            await Send(player, InstanceEntities.CreateObject(marker.Object,
                     InstanceEntities.ObjectTypeHash(EffectObject.TypePath),
                     new EffectObject(at.X, at.Y, loop) { Flags0 = EffectObject.FixedRotation }.Blob()),
                 $"0x02bb create effect 0x{marker.Object:x} {loop} at ({at.X}, {at.Y})");
-            await Send(remote, stream, ciphers, InstanceProtocol.EnterWakeZone(marker.Object), null);
+            await Send(player, InstanceProtocol.EnterWakeZone(marker.Object), null);
         }
         // Quality: a chance that lightning strikes the new marker as it is set; the marker stays for its own strike.
-        int chance = Own("storm_call_chance_to_strike_on_cast_%");
-        if (chance > 0 && Random.Shared.Next(100) < chance)
+        int chance = Own(Stat.StormCallChanceToStrikeOnCastPct);
+        if (chance > 0 && AreaRng(player).Next(100) < chance)
         {
-            Console.WriteLine($"[gateway] {remote} storm call strike on cast at marker 0x{marker.Object:x} ({chance}% chance)");
-            await StormCallStrike(remote, stream, ciphers, conn, marker, removeMarker: false);
+            Console.WriteLine($"[gateway] {player.Connection.Remote} storm call strike on cast at marker 0x{marker.Object:x} ({chance}% chance)");
+            await StormCallStrike(player, marker, removeMarker: false);
         }
-        _ = StrikeStormCallsWhenDue(remote, stream, ciphers, conn, marker.StrikeAt, marker.Epoch);
+        _ = StrikeStormCallsWhenDue(player, marker.StrikeAt, marker.Epoch);
     }
 
-    static async Task StrikeStormCallsWhenDue(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
+    static async Task StrikeStormCallsWhenDue(Player player,
         double at, int epoch)
     {
         try
         {
             while (true)
             {
-                double wait = at - conn.Clock.Elapsed.TotalSeconds;
-                if (wait > 0) await Task.Delay(TimeSpan.FromSeconds(wait));
-                await WhilePaused(conn);
-                if (conn.Closed) return;
-                if (conn.Clock.Elapsed.TotalSeconds >= at) break;
+                double wait = at - AreaTime(player);
+                if (wait > 0) await AreaDelay(player, wait);
+                await WhilePaused(player);
+                if (player.Closed) return;
+                if (AreaTime(player) >= at) break;
             }
-            IReadOnlyList<StormCallMarkers.Marker> struck;
-            lock (conn.Monsters)
-            {
-                if (conn.Closed || conn.LeavingArea || conn.ProjectileEpoch != epoch) return;
-                struck = conn.StormCall.TakeStrikes(conn.Clock.Elapsed.TotalSeconds, epoch);
-            }
-            if (struck.Count == 0) return;
-            Console.WriteLine($"[gateway] {remote} storm call strike: {struck.Count} marker(s) "
-                + string.Join(", ", struck.Select(m => $"0x{m.Object:x}")));
-            await Task.WhenAll(struck.Select(m => StormCallStrike(remote, stream, ciphers, conn, m, removeMarker: true)));
+            await StrikeDueStormCalls(player, AreaTime(player), epoch);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
     }
 
+    internal static async Task StrikeDueStormCalls(Player player, double now, int epoch)
+    {
+        if (player.Closed || player.LeavingArea || player.ProjectileEpoch != epoch) return;
+        var markers = player.StormCall;
+        IReadOnlyList<StormCallMarkers.Marker> struck;
+        lock (markers) struck = markers.TakeStrikes(now, epoch);
+        if (struck.Count == 0) return;
+        Console.WriteLine($"[gateway] {player.Connection.Remote} storm call strike: {struck.Count} marker(s) "
+            + string.Join(", ", struck.Select(m => $"0x{m.Object:x}")));
+        await Task.WhenAll(struck.Select(m => StormCallStrike(player, m, removeMarker: true)));
+    }
+
     // One marker's lightning: the impact art there and the skill's area hit around it, with the cast's critical roll and
     // repeat (Spell Echo's final-repeat damage). A dead player or a gem no longer socketed strikes nothing.
-    static async Task StormCallStrike(string remote, NetworkStream stream, ConnectionCiphers ciphers, ClientState conn,
+    static async Task StormCallStrike(Player player,
         StormCallMarkers.Marker marker, bool removeMarker)
     {
-        if (removeMarker) await Send(remote, stream, ciphers, InstanceProtocol.RemoveObject(marker.Object), null);
-        var gem = GemSkillEffects(conn).FirstOrDefault(g => g.Id == marker.Skill);
-        if (marker.Use is not StormCallUse use || !use.Sacrifice.Current || gem.Name is null || !IsStormCall(SkillsFor(conn).EffectId(gem.Effect)) || conn.PlayerLife == 0)
+        if (marker.Use is PlacedStormCallUse placed)
         {
-            Console.WriteLine($"[gateway] {remote} storm call marker 0x{marker.Object:x} strikes nothing (gem gone or player dead)");
+            if (player.ProjectileRuntime is not { Active: true } session) return;
+            var area = player.Area;
+            void Strike(GameArea _)
+            {
+                using (ProjectileMutation(player, advance: false))
+                    if (session.Active) session.CommitPlacedStormCallStrike(marker, placed, removeMarker);
+            }
+
+            if (area.Driven && !area.Owned) area.Defer(Strike);
+            else Strike(area);
             return;
         }
-        int radius = SkillRadius(conn, SupportedSkill(conn, marker.Skill).Stats, spell: true, gem.Effect);
-        var (_, impact, _) = StormCallArt(conn, gem.Gem);
+        if (removeMarker) await Send(player, InstanceProtocol.RemoveObject(marker.Object), null);
+        var gem = GemSkillEffects(player).FirstOrDefault(g => g.Id == marker.Skill);
+        if (marker.Use is not StormCallUse use || !use.Sacrifice.Current || gem.Name is null || !IsStormCall(SkillsFor(player).EffectId(gem.Effect)) || player.PlayerLife == 0)
+        {
+            Console.WriteLine($"[gateway] {player.Connection.Remote} storm call marker 0x{marker.Object:x} strikes nothing (gem gone or player dead)");
+            return;
+        }
+        using var intensity = use.Intensity is { } cast ? new IntensityScope(cast) : null;
+        int radius = SkillRadius(player, SupportedSkill(player, marker.Skill).Stats, spell: true, gem.Effect);
+        var (_, impact, _) = StormCallArt(player, gem.Gem);
         if (impact is not null)
         {
             uint effect;
-            lock (conn.Monsters) effect = conn.TakeObjectId();
-            float scale = (float)(radius * (250.0 / 23) / (Art.ArtRadius(impact) ?? 250));
-            await Send(remote, stream, ciphers, InstanceEntities.CreateObject(effect, InstanceEntities.ObjectTypeHash(EffectObject.TypePath),
+            effect = player.TakeObjectId();
+            float scale = AreaArtScale(radius, impact);
+            await Send(player, InstanceEntities.CreateObject(effect, InstanceEntities.ObjectTypeHash(EffectObject.TypePath),
                     new EffectObject(marker.At.X, marker.At.Y, impact) { Flags0 = EffectObject.FixedRotation, Scale = scale }.Blob()),
                 $"0x02bb create effect 0x{effect:x} {impact} at ({marker.At.X}, {marker.At.Y}), scale {scale:0.###} for radius {radius}");
-            await Send(remote, stream, ciphers, InstanceProtocol.EnterWakeZone(effect), null);
-            SendAfter(StormCallImpactArtSeconds, async () =>
+            await Send(player, InstanceProtocol.EnterWakeZone(effect), null);
+            SendAfter(player, StormCallImpactArtSeconds, async () =>
             {
-                if (conn.Closed || conn.LeavingArea || conn.ProjectileEpoch != marker.Epoch) return;
-                await Send(remote, stream, ciphers, InstanceProtocol.RemoveObject(effect), null);
+                if (player.Closed || player.LeavingArea || player.ProjectileEpoch != marker.Epoch) return;
+                await Send(player, InstanceProtocol.RemoveObject(effect), null);
             });
         }
-        await AreaSkillHit(remote, stream, ciphers, conn, marker.Skill, gem, marker.At, marker.At, immediate: true,
+
+        await AreaSkillHit(player, marker.Skill, gem, marker.At, marker.At, immediate: true,
             criticalRoll: use.Critical, repeat: marker.Repeat, sacrifice: use.Sacrifice, damageMore: use.DamageMore,
-            triggeredCurrent: () => !conn.Closed && !conn.LeavingArea && conn.ProjectileEpoch == marker.Epoch && conn.PlayerLife > 0);
+            triggeredCurrent: () => !player.Closed && !player.LeavingArea && player.ProjectileEpoch == marker.Epoch && player.PlayerLife > 0);
+    }
+
+    public sealed partial class ProjectileSession
+    {
+        internal void SchedulePlacedStormCall(
+            (ushort Id, int Effect, string Name, int Level, int Quality, uint Gem) gem, PlacedAreaHit placement, Func<bool> current)
+        {
+            if (!Active || !current()) return;
+            var stats = placement.Device.Own;
+            var caster = CharacterPlayerStats(Player);
+            int Own(uint key) => stats.GetValueOrDefault(key);
+            double duration = SkillDurationModifiers.Seconds(Own(Stat.BaseSkillEffectDuration),
+                key => caster.GetValueOrDefault(key), Own);
+            long due = Runtime.Now + ProjectileRuntime.Time(duration);
+            var (loop, impact, _) = StormCallArt(Player, gem.Gem);
+            var use = new PlacedStormCallUse(placement, current, loop, impact);
+            var aim = placement.Device.At;
+            var markers = Player.StormCall;
+            foreach (var at in new[] { aim }.Concat(SpellCascadeAreas(Player, gem.Effect, stats, aim, aim)))
+            {
+                var marker = new StormCallMarkers.Marker(Player.TakeObjectId(), gem.Id, at,
+                    due / (double)ProjectileRuntime.QuantaPerSecond, 0, Player.ProjectileEpoch, 0, use);
+                lock (markers) markers.Place(marker);
+                if (loop is not null)
+                {
+                    Player.TrackProjectileObject(marker.Object);
+                    Create(marker.Object, () => InstanceEntities.CreateObject(marker.Object,
+                        InstanceEntities.ObjectTypeHash(EffectObject.TypePath),
+                        new EffectObject(at.X, at.Y, loop) { Flags0 = EffectObject.FixedRotation }.Blob()), wake: true);
+                }
+                int chance = Own(Stat.StormCallChanceToStrikeOnCastPct);
+                if (chance > 0 && AreaRng(Player).Next(100) < chance)
+                    CommitPlacedStormCallStrike(marker, use, removeMarker: false);
+            }
+
+            Runtime.Schedule(due, () =>
+            {
+                if (!Active) return;
+                IReadOnlyList<StormCallMarkers.Marker> struck;
+                lock (markers) struck = markers.TakeStrikes(ProjectileWorldTime(Player), Player.ProjectileEpoch);
+                foreach (var marker in struck)
+                    if (marker.Use is PlacedStormCallUse proxy)
+                        CommitPlacedStormCallStrike(marker, proxy, removeMarker: true);
+                    else Enqueue(() => StormCallStrike(Player, marker, removeMarker: true));
+            });
+        }
+
+        internal void CommitPlacedStormCallStrike(StormCallMarkers.Marker marker, PlacedStormCallUse use, bool removeMarker)
+        {
+            if (Player.ProjectileEpoch != marker.Epoch) return;
+            if (removeMarker && use.Loop is not null)
+            {
+                Player.UntrackProjectileObject(marker.Object);
+                WorldRecords(marker.Object, () => [InstanceProtocol.RemoveObject(marker.Object)], remove: true);
+            }
+            if (Player.PlayerLife == 0 || !use.Current()) return;
+            var device = use.Placement.Device;
+            int radius = SkillRadius(Player, device.Own, spell: true, device.Effect);
+            if (use.Impact is { } art)
+                Effect(marker.At.X, marker.At.Y, art, ProjectileRuntime.Time(StormCallImpactArtSeconds), radius);
+            use.Placement.Apply(Player, marker.At, radius, ProjectileWorldTime(Player));
+        }
     }
 }

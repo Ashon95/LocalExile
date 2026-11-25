@@ -5,8 +5,41 @@ using GameServer.Core;
 /// Vendor-specific quest/class gem membership from the reviewed snapshot, joined to native quest offers.
 /// Siosa and campaign Lilly use their own all-class unlocks; hard mode keeps its native gem index.
 /// </summary>
-public sealed class GemVendorStock(ItemCatalog items, QuestRewardCatalog rewards, NpcCatalog npcs, SkillCatalog skills, string folder = "data")
+public sealed class GemVendorStock
 {
+    readonly ItemCatalog items;
+    readonly QuestRewardCatalog rewards;
+    readonly NpcCatalog npcs;
+    readonly SkillCatalog skills;
+    readonly string folder;
+
+    public GemVendorStock(ItemCatalog items, QuestRewardCatalog rewards, NpcCatalog npcs, SkillCatalog skills, string folder = "data")
+    {
+        this.items = items;
+        this.rewards = rewards;
+        this.npcs = npcs;
+        this.skills = skills;
+        this.folder = folder;
+        hardModeRows = HardModeGemRows(folder);
+        sellable = new[] { false, true }
+            .SelectMany(support => new[] { 1, 2, 3, 4 }.SelectMany(colour => items.ShopGems(colour, support)))
+            .ToDictionary(t => t.Id,t => t.Row,StringComparer.Ordinal);
+        act1To3OffersByBase = VendorCatalog.Default is not null ? BuildAct1To3Offers(VendorCatalog.Default) : null;
+    }
+
+    static Dictionary<string, int[]> BuildAct1To3Offers(VendorCatalog catalog)
+    {
+        var map = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (string vendor in new[] { "Nessa", "Yeena", "Clarissa" })
+            foreach (var rule in catalog.Gems(vendor))
+            {
+                if (rule.Offers.Length == 0) continue;
+                if (!map.TryGetValue(rule.Base, out var offers)) map[rule.Base] = offers = [];
+                foreach (int offer in rule.Offers) offers.Add(offer);
+            }
+        return map.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray(), StringComparer.Ordinal);
+    }
+
     // Cache immutable catalogues, never character stock: quest/class/rule filters are evaluated on every open.
     static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ItemCatalog,
         System.Collections.Concurrent.ConcurrentDictionary<(NpcCatalog Npcs, SkillCatalog Skills, bool Hard, bool Supports),
@@ -29,22 +62,22 @@ public sealed class GemVendorStock(ItemCatalog items, QuestRewardCatalog rewards
     /// <summary>Siosa sells after a3q12 "A Fixture of Fate".</summary>
     public const string SiosaUnlock = "a3q12-DeliveredPages";
 
-    /// <summary>The currency/flask/jewellery vendors that also sell gems (poedb "Vendor" roles), by NPCs.dat Id.</summary>
+    /// <summary>The currency/flask/jewellery vendors that also sell gems (poedb "Vendor" roles), by NPCs.dat Id.
+    /// Lani has no gem tab in retail (Act 5/10/Epilogue).</summary>
     static readonly HashSet<string> Vendors = new(StringComparer.OrdinalIgnoreCase)
     {
         "Metadata/NPC/Act1/Nessa", "Metadata/NPC/Act2/Yeena", "Metadata/NPC/Act3/ClarissaTown",
-        "Metadata/NPC/Act4/PetarusVanja", "Metadata/NPC/Act5/Lani", "Metadata/NPC/Act6/Lilly",
+        "Metadata/NPC/Act4/PetarusVanja", "Metadata/NPC/Act6/Lilly",
         "Metadata/NPC/Act7/YeenaTown", "Metadata/NPC/Act8/ClarissaTown", "Metadata/NPC/Act9/PetarusVanja",
-        "Metadata/NPC/Act10/Lani", "Metadata/NPC/Act10/Lilly", "Metadata/NPC/Epilogue/Lani",
-        "Metadata/NPC/Epilogue/Lilly", "Metadata/NPC/Epilogue/Lilly2", "Metadata/NPC/Epilogue/LillyHideout", "Metadata/NPC/Act3/Siosa",
+        "Metadata/NPC/Act10/Lilly", "Metadata/NPC/Epilogue/Lilly", "Metadata/NPC/Epilogue/Lilly2",
+        "Metadata/NPC/Epilogue/LillyHideout", "Metadata/NPC/Act3/Siosa",
     };
 
     public static bool Sells(string npcId) => Vendors.Contains(npcId);
 
-    readonly Dictionary<string,int> sellable = new[] { false, true }
-        .SelectMany(support => new[] { 1, 2, 3, 4 }.SelectMany(colour => items.ShopGems(colour, support)))
-        .ToDictionary(t => t.Id,t => t.Row,StringComparer.Ordinal);
-    readonly Lazy<IReadOnlySet<int>> hardModeRows = new(() => HardModeGemRows(folder));
+    readonly Dictionary<string,int> sellable;
+    readonly IReadOnlySet<int> hardModeRows;
+    volatile Dictionary<string, int[]>? act1To3OffersByBase;
 
     /// <summary>The NPC's gem stock at character level/quest state: BaseItemTypes rows, in row order. Empty before the
     /// character has completed a quest that offers gems (or when campaign Lilly/Siosa's unlock is missing).
@@ -56,12 +89,13 @@ public sealed class GemVendorStock(ItemCatalog items, QuestRewardCatalog rewards
             || npcId.EndsWith("/Lilly2", StringComparison.OrdinalIgnoreCase)
             || npcId.EndsWith("/LillyHideout", StringComparison.OrdinalIgnoreCase);
         bool siosa = npcId.EndsWith("/Siosa", StringComparison.OrdinalIgnoreCase);
+        if (!Sells(npcId)) return [];
         if ((lilly && !hideoutLilly && !flags.Contains(LillyUnlock)) || (siosa && !flags.Contains(SiosaUnlock))) return [];
         rules ??= LeagueRules.Standard;
         if (!rules.SellsGemsAt(npcId)) return [];
         // The HardMode index lists what its vendor exchanges.
         if (hardMode)
-            return [.. sellable.Values.Intersect(hardModeRows.Value).Where(row => items.Row(row) is { } type
+            return [.. sellable.Values.Intersect(hardModeRows).Where(row => items.Row(row) is { } type
                 && rules.AllowsGemBase(type.Id)
                 && items.Gem(type) is { Variants.Count: > 0 } gem && (rules.SellsSupportGems || !gem.IsSupport)
                 && skills.PlayerLevelReq(gem.Variant(0).Effect, 1) <= level).Order()];
@@ -73,12 +107,22 @@ public sealed class GemVendorStock(ItemCatalog items, QuestRewardCatalog rewards
             : npcId.Contains("/Act3/") ? "Clarissa" : npcId.Contains("/Act4/") ? "Petarus and Vanja" : "";
         if (siosa) vendor = "Siosa";
         var catalog = VendorCatalog.Default;
+        if (catalog is null) return [];
+        var act1To3Offers = act1To3OffersByBase;
+        if (act1To3Offers is null)
+            act1To3OffersByBase = act1To3Offers = BuildAct1To3Offers(catalog);
         var selected = vendor.Length > 0 ? catalog.Gems(vendor)
             : new[] { "Nessa", "Yeena", "Clarissa", "Petarus and Vanja" }.SelectMany(catalog.Gems);
         var rows = new SortedSet<int>();
         foreach (var rule in selected)
-            if ((siosa || rule.Class == classRow) && (siosa || rule.Offers.Any(Done))
-                && sellable.TryGetValue(rule.Base,out int row)) rows.Add(row);
+        {
+            bool unlocked = siosa
+                // Siosa sells all classes' Act 1-3 gems only once their Act 1-3 quest offers are completed;
+                // Library-exclusive gems without Act 1-3 vendor offers unlock from Siosa's own a3q12 quest.
+                ? (act1To3Offers is null || !act1To3Offers.TryGetValue(rule.Base, out var questOffers) || questOffers.Any(Done))
+                : (rule.Class == classRow && rule.Offers.Any(Done));
+            if (unlocked && sellable.TryGetValue(rule.Base, out int row)) rows.Add(row);
+        }
         return Filter(rows);
 
         IReadOnlyList<int> Filter(IEnumerable<int> selectedRows) => [.. selectedRows.Where(row =>

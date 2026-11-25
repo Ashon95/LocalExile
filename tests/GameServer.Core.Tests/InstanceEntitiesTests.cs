@@ -72,7 +72,7 @@ public class InstanceEntitiesTests
         string pool(uint v) => Convert.ToHexString(BitConverter.GetBytes(v)) + "00000000" + "0000" + "00000000" + "00000000"; // current, reserved 0
         string expected =
             "00" + "00" +                                                     // flags, base data
-            "73000000" + "45000000" + "00000000" + "0000" + "0002" + "0001" + // Positioned, flags1 0x02: not hidden, shown
+            "73000000" + "45000000" + "00000000" + "0000" + "0000" +        // Positioned: blocking is the type's own
             "00" + "00000000" + "00000000" + "00" +                           // comp1
             "0000" +                                                          // comp3
             pool(50) + pool(40) + pool(0) + "00" +                            // Life
@@ -105,7 +105,7 @@ public class InstanceEntitiesTests
             Skills: [new GrantedSkill(0x0102, 4474, 4430, stats)], Stats: stats).Blob();
         string hex = Convert.ToHexString(b);
         const string statList = "02" + "8142" + "8341" + "8117" + "02";       // compact: count, key 0x142 = 833, key 0x117 = 2
-        Assert.StartsWith("0000" + "73000000" + "45000000" + "00000000" + "0000" + "0002" + "0001" + // flags, base, Positioned
+        Assert.StartsWith("0000" + "73000000" + "45000000" + "00000000" + "0000" + "0000" +          // flags, base, Positioned
             statList + "00000000" + "00000000" + "00", hex);                  // comp1 = Stats
         string actor =
             "00000000" + "0000" + "00" + "00000000" + "00000000" +           // Actor main body
@@ -123,7 +123,7 @@ public class InstanceEntitiesTests
         string pool(uint v) => Convert.ToHexString(BitConverter.GetBytes(v)) + "00000000" + "0000" + "00000000" + "00000000";
         string expected =
             "00" + "00" +                                                     // flags, base data
-            "73000000" + "45000000" + "00000000" + "0100" + "0002" + "0001" + // Positioned (no Sector prefix), team 1, shown
+            "73000000" + "45000000" + "00000000" + "0100" + "0000" +        // Positioned (no Sector prefix), team 1
             "00" + "00000000" + "00000000" + "00" +                           // Stats
             "0800" + "00" + "00" +                                            // ObjectMagicProperties: identified, normal; flags
             "0000" +                                                          // Buffs (BaseEvents, Pathfinding: none)
@@ -133,7 +133,7 @@ public class InstanceEntitiesTests
             "00000000" + "0000" + "00" + "00000000" + "00000000" + "0000" +    // Actor (life >= 1: no conditional u8s)
             "00";                                                             // Monster reads nothing; tasks
         Assert.Equal(expected, Convert.ToHexString(b));
-        Assert.Equal(112, b.Length);
+        Assert.Equal(110, b.Length);
     }
 
     [Fact]
@@ -147,9 +147,30 @@ public class InstanceEntitiesTests
     [Fact]
     public void Animation_update_layout()
     {
-        // header, u8 kind (0 = play), u32 animation index, u32 float bits (speed 1.0).
-        Assert.Equal("01B2" + "00003000" + "00000000" + "0000" + "00" + "00000005" + "3F800000",
-            Convert.ToHexString(InstanceProtocol.AnimationUpdate(0x3000, 0, 5, 1f)));
+        const string header = "01B2" + "00003000" + "00000000" + "0000";
+        // Retail 0x141fe58a0: kinds 0/1 carry u32 index + f32 speed (21 B), kinds 2/3 carry f32 speed only (17 B),
+        // and kind >= 4 throws "Bad packet: InstanceClientAnimationUpdate".
+        byte[] k0 = InstanceProtocol.AnimationUpdate(0x3000, 0, 5, 1f);
+        byte[] k1 = InstanceProtocol.AnimationUpdate(0x3000, 1, 7, 2f);
+        byte[] k2 = InstanceProtocol.AnimationUpdate(0x3000, 2, 99, 0.5f);
+        byte[] k3 = InstanceProtocol.AnimationUpdate(0x3000, 3, 99, 3f);
+
+        Assert.Equal(21, k0.Length);
+        Assert.Equal(header + "00" + "00000005" + "3F800000", Convert.ToHexString(k0));
+        Assert.Equal(21, k1.Length);
+        Assert.Equal(header + "01" + "00000007" + "40000000", Convert.ToHexString(k1));
+        Assert.Equal(17, k2.Length);
+        Assert.Equal(header + "02" + "3F000000", Convert.ToHexString(k2));
+        Assert.Equal(17, k3.Length);
+        Assert.Equal(header + "03" + "40400000", Convert.ToHexString(k3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => InstanceProtocol.AnimationUpdate(0x3000, 4, 99, 1f));
+
+        Assert.Equal(21, InstanceProtocol.AnimationUpdateLength(0));
+        Assert.Equal(21, InstanceProtocol.AnimationUpdateLength(1));
+        Assert.Equal(17, InstanceProtocol.AnimationUpdateLength(2));
+        Assert.Equal(17, InstanceProtocol.AnimationUpdateLength(3));
+        Assert.Equal(-1, InstanceProtocol.AnimationUpdateLength(4));
+        Assert.Equal(-1, InstanceProtocol.AnimationUpdateLength(255));
     }
 
     [Fact]
@@ -211,9 +232,9 @@ public class InstanceEntitiesTests
     {
         string plain = Convert.ToHexString(new MonsterObject(1, 2, 100, MonsterObject.BaseComponents).Blob());
         string rare = Convert.ToHexString(new MonsterObject(1, 2, 100, MonsterObject.BaseComponents, Rarity: MonsterRarity.Rare, Name: "Ab").Blob());
-        // Positioned (18) + Stats (10) after flags/base (2): ObjectMagicProperties starts at byte 30.
-        Assert.Equal("0800" + "00" + "00", plain.Substring(60, 8));
-        Assert.Equal("8A00" + "00" + "02000000" + "41006200" + "00", rare.Substring(60, 24));
+        // Positioned (16) + Stats (10) after flags/base (2): ObjectMagicProperties starts at byte 28.
+        Assert.Equal("0800" + "00" + "00", plain.Substring(56, 8));
+        Assert.Equal("8A00" + "00" + "02000000" + "41006200" + "00", rare.Substring(56, 24));
         Assert.Equal(plain.Length + 2 * (4 + 4), rare.Length);
     }
 
@@ -234,7 +255,7 @@ public class InstanceEntitiesTests
             "02" + "44332211" + "88776655" +                    // the name: prefix, suffix keys
             "02" + "CDAB" + "28" + "0201" + "BFB0" + "80C8" +   // explicit: 40 (one byte); -80 and 200 (two bytes, 0x80 prefix)
             "00";                                               // the component's own flags
-        Assert.Equal(omp, hex.Substring(60, omp.Length));
+        Assert.Equal(omp, hex.Substring(56, omp.Length));
         Assert.Equal(plain.Length - 8 + omp.Length, hex.Length);
     }
 
@@ -242,7 +263,7 @@ public class InstanceEntitiesTests
     public void A_custom_name_wins_over_name_words()
     {
         var named = new MonsterObject(1, 2, 100, MonsterObject.BaseComponents, Rarity: MonsterRarity.Rare, Name: "Ab") { NameWords = [1] };
-        Assert.Equal("8A00" + "00" + "02000000" + "41006200" + "00", Convert.ToHexString(named.Blob()).Substring(60, 24));
+        Assert.Equal("8A00" + "00" + "02000000" + "41006200" + "00", Convert.ToHexString(named.Blob()).Substring(56, 24));
     }
 
     [Fact]
@@ -310,8 +331,8 @@ public class InstanceEntitiesTests
         // Only the uniform scale: the x / y stretches multiply it, so they stay 1.
         Assert.Equal(1f, BitConverter.ToSingle(scaled, 2 + 20));
         Assert.Equal(1f, BitConverter.ToSingle(scaled, 2 + 24));
-        // shown (0 1), Animated 0, TriggerableBlockage blocked with no list (1 0), Transitionable 1, tasks 0.
-        Assert.Equal("0001" + "00" + "0100" + "01" + "00", Convert.ToHexString(scaled.AsSpan(scaled.Length - 7)));
+        // Animated 0, TriggerableBlockage blocked with no list (1 0), Transitionable 1, tasks 0.
+        Assert.Equal("00" + "0100" + "01" + "00", Convert.ToHexString(scaled.AsSpan(scaled.Length - 5)));
     }
 
     [Fact]
@@ -413,10 +434,66 @@ public class InstanceEntitiesTests
     [Fact]
     public void Effect_object_blob()
     {
-        // flags, base data count, Positioned (x, y, rotation, team, f0, f1 0x02, 0, 1), Animated bit0 + u32-counted UTF-16 path, tasks.
+        // flags, base data count, Positioned (x, y, rotation, team, f0, f1), Animated bit0 + u32-counted UTF-16 path, tasks.
         byte[] b = new EffectObject(10, 20, "a.ao").Blob();
-        Assert.Equal("0000" + "0A000000" + "14000000" + "00000000" + "0000" + "00" + "02" + "00" + "01" + "01" + "04000000" + "61002E0061006F00" + "00",
+        Assert.Equal("0000" + "0A000000" + "14000000" + "00000000" + "0000" + "00" + "00" + "01" + "04000000" + "61002E0061006F00" + "00",
             Convert.ToHexString(b));
+    }
+
+    [Fact]
+    public void Effect_object_blob_orders_positioned_scale_before_height_and_animated_attachment_before_animation()
+    {
+        // Retail Positioned (0x141e323f0) reads flags0 0x20 (scale + stretches) before 0x04 (fixed height / native fields).
+        // Retail Animated (0x141e5afd0) reads bit 0x04 (bone attachment) before bit 0x08 (animation id, 0, speed),
+        // and requires bit 0x04 in the flags byte whenever a parent attachment is present.
+        var effect = new EffectObject(10, 20, "a.ao")
+        {
+            Flags0 = (byte)(EffectObject.FixedRotation | 0x04),
+            Scale = 2f,
+            AnimationWord = 22,
+            AnimationValue = -172f,
+            AnimatedFlags = 0x08,
+            AnimationId = 6,
+            Parent = 0x1000,
+            Bone = "<root>",
+            AttachKind = 0,
+            AttachFlags = 3,
+        };
+        byte[] blob = effect.Blob();
+        string expected =
+            "0000" +                                                               // object flags, base data count
+            "0A000000" + "14000000" + "00000000" + "0000" + "A4" + "00" +          // Positioned: flags0 = 0x80 | 0x20 | 0x04, flags1 = 0 (type's own blocking)
+            "00000040" + "0000803F" + "0000803F" +                                 // flags0 0x20: scale 2.0, stretchX 1.0, stretchY 1.0
+            "16000000" + "00002CC3" +                                              // flags0 0x04: word 22, value -172.0
+            "0D" + "04000000" + "61002E0061006F00" +                               // Animated: flags = 0x01 | 0x04 | 0x08, WStr32("a.ao")
+            "00100000" + "00000000" + "00000000" + "06000000" + "3C726F6F743E" +   // Animated 0x04: parent 0x1000, 0f, 0f, "<root>"
+            "0003" + "00000000" + "00000000" + "00000000" +                        // attachKind 0, attachFlags 3, offset (0, 0, 0)
+            "06000000" + "00000000" + "0000803F" +                                 // Animated 0x08: AnimationId 6, u32 0, speed 1.0
+            "00";                                                                  // tasks
+        Assert.Equal(expected, Convert.ToHexString(blob));
+
+        // Explicit 0x09 (bit0 | bit3) with a parent yields the same 0x0D flags and byte layout.
+        Assert.Equal(blob, (effect with { AnimatedFlags = 0x09 }).Blob());
+        // Explicit 0x09 or 0x0D without a parent omits bit 0x04 and the attachment record.
+        byte[] unattached = (effect with { AnimatedFlags = 0x09, Parent = 0 }).Blob();
+        Assert.Equal(0x09, unattached[38]);
+        Assert.Equal(unattached, (effect with { AnimatedFlags = 0x0D, Parent = 0 }).Blob());
+    }
+
+    [Fact]
+    public void Quest_object_stats_precede_trailing_zeroes()
+    {
+        // Retail Stats (0x1421c98b0) reads the compact stat count + (key, value) pairs before trailing u32 0, u32 0, u8 0.
+        const string prefix = "0000" + "0A000000" + "14000000" + "00000000" + "0000" + "0000";
+        byte[] empty = new QuestObject(10, 20, ["Positioned", "Stats"]).Blob();
+        Assert.Equal(prefix + "00" + "00000000" + "00000000" + "00" + "00", Convert.ToHexString(empty));
+
+        byte[] populated = new QuestObject(10, 20, ["Positioned", "Stats"])
+        {
+            Stats = [(0x142u, 833), (0x117u, 2)],
+        }.Blob();
+        const string statList = "02" + "8142" + "8341" + "8117" + "02";
+        Assert.Equal(prefix + statList + "00000000" + "00000000" + "00" + "00", Convert.ToHexString(populated));
     }
 
     [Fact]
@@ -487,20 +564,20 @@ public class InstanceEntitiesTests
     [Fact]
     public void A_pet_does_not_block_walkers()
     {
-        // Positioned: x, y, rotation, u16, flags0 0, flags1 0x0a, the shown pair (0, 1), then 1 for flags1 0x08.
+        // Positioned: x, y, rotation, u16, flags0 0, flags1 0x08, then its 1.
         byte[] blob = new PetObject(10, 20, 0x1000).Blob();
-        Assert.Equal("0000" + "0A000000" + "14000000" + "00000000" + "0000" + "00" + "0A" + "00" + "01" + "01", Convert.ToHexString(blob[..21]));
+        Assert.Equal("0000" + "0A000000" + "14000000" + "00000000" + "0000" + "00" + "08" + "01", Convert.ToHexString(blob[..19]));
     }
 
     [Fact]
     public void An_effect_object_with_a_fixed_rotation_sets_positioned_flags0_0x80()
     {
-        // object flags, entry count, x, y, f32 rotation, u16, flags0, flags1 (0x02: shown)
+        // object flags, entry count, x, y, f32 rotation, u16, flags0, flags1
         byte[] fixedRing = new EffectObject(10, 20, "Metadata/Effects/Spells/ri_fire/rifire.ao") { Flags0 = EffectObject.FixedRotation }.Blob();
         byte[] plain = new EffectObject(10, 20, "Metadata/Effects/Spells/ri_fire/rifire.ao").Blob();
         Assert.Equal(0x80, fixedRing[16]);
         Assert.Equal(0x00, plain[16]);
-        Assert.Equal(0x02, fixedRing[17]);
+        Assert.Equal(0x00, fixedRing[17]);
         Assert.Equal(plain.Length, fixedRing.Length);
     }
 
@@ -512,7 +589,7 @@ public class InstanceEntitiesTests
         var ring = new EffectObject(10, 20, "a.ao") { Flags0 = EffectObject.FixedRotation, Scale = 0.5f };
         byte[] scaled = ring.Blob(), plain = (ring with { Scale = 1 }).Blob();
         Assert.Equal(0xa0, scaled[16]);
-        Assert.Equal(0x02, scaled[17]);
+        Assert.Equal(0x00, scaled[17]);
         Assert.Equal("0000003F" + "0000803F" + "0000803F", Convert.ToHexString(scaled[18..30]));
         Assert.Equal(plain.Length + 12, scaled.Length);
         Assert.Equal(plain[18..], scaled[30..]);
@@ -537,6 +614,18 @@ public class InstanceEntitiesTests
         var second = InstanceItems.ReadUseItem(Convert.FromHexString("00580000000100000042"));
         Assert.Equal(1u, second.InventoryId);
         Assert.Equal(0x42u, second.ItemId);
+    }
+
+    [Fact]
+    public void Use_item_click_reads_the_inventory_and_item_big_endian()
+    {
+        Assert.Equal(11, InstanceProtocol.KnownClientLength(InstanceItems.UseItemClickId));
+        var fromStash = InstanceItems.ReadUseItemClick(Convert.FromHexString("0057000008074000006100"));
+        Assert.Equal(0x807u, fromStash.InventoryId);
+        Assert.Equal(0x40000061u, fromStash.ItemId);
+        var fromInventory = InstanceItems.ReadUseItemClick(Convert.FromHexString("0057000000014000006100"));
+        Assert.Equal(1u, fromInventory.InventoryId);
+        Assert.Equal(0x40000061u, fromInventory.ItemId);
     }
 
     [Fact]
@@ -594,7 +683,7 @@ public class InstanceEntitiesTests
     public void Area_transition_with_a_tile_object_model_rotation_and_height()
     {
         // Live 2026-10-17: the Coast exit with the tile's arch (.tmd record beachencampment_v01_01_area_transition2):
-        // Positioned rotation float, flags0 bit2 = fixed height (u32 steps of 7.8125, float z), Animated bit0 + .ao path.
+        // Positioned rotation float, flags0 bit2 = fixed height (i32 -z/7.8125 marker, float z), Animated bit0 + .ao path.
         const string model = "Metadata/Terrain/Beach/Town_v2/beachencampment_v01_01_area_transition2.ao";
         byte[] b = new AreaTransitionObject(GridX: 388, GridY: 230, DestinationHash16: 0x7ad2, Model: model,
             Rotation: MathF.PI / 2, Height: -351.04f) { InTown = true }.Blob();
@@ -602,7 +691,7 @@ public class InstanceEntitiesTests
         Assert.StartsWith(
             "00" + "00" +
             "84010000" + "E6000000" + "DB0FC93F" + "0000" + "04" + "00" +   // Positioned (388, 230), 90°, flags0 0x04
-            "D3FFFFFF" + "1F85AFC3" +                                        // height -45 steps, z -351.04
+            "2D000000" + "1F85AFC3" +                                        // marker +45 (-z/7.8125), z -351.04
             "01" + "49000000" + Convert.ToHexString(System.Text.Encoding.Unicode.GetBytes(model)) +
             "00" + "02" + "D27A" + "00", hex);                               // AreaTransition as before
         Assert.Equal(41 + 8 + 4 + model.Length * 2, b.Length);
@@ -688,8 +777,173 @@ public class InstanceEntitiesTests
         byte[] b = new MonsterObject(0x73, 0x45, Life: 15, MonsterObject.BaseComponents,
             Skills: [new GrantedSkill(0x0102, 4394, 4320, [.. stats, (0x4f32, 1)])], Stats: stats).Blob();
         string hex = Convert.ToHexString(b);
-        Assert.Contains("0001" + "01" + "8142" + "8960" + "00000000" + "00000000" + "00", hex);   // Stats after Positioned
+        Assert.Contains("0000" + "01" + "8142" + "8960" + "00000000" + "00000000" + "00", hex);   // Stats after Positioned
         Assert.EndsWith("4000" + "01" + "0201" + "00" + "2A110000" + "00" + "E0100000" + "00" + "00" +
             "00000000" + "00000000" + "00000000" + "00" + "02" + "8142" + "8960" + "C04F32" + "01" + "00" + "00000000" + "00", hex);
+    }
+
+    [Fact]
+    public void Dead_player_and_monster_blobs_emit_two_dead_pose_bytes_after_stance()
+    {
+        byte[] alivePlayer = new PlayerObject("Exile", 3, 10, 20, Life: 50, Mana: 40).Blob();
+        byte[] deadPlayer = new PlayerObject("Exile", 3, 10, 20, Life: 0, Mana: 40).Blob();
+        Assert.Equal(alivePlayer.Length + 2, deadPlayer.Length);
+        // Trailing bytes of Actor (no skills) + tasks: u32 + u32 + u8 + u8 + u8 = 11 bytes after dead pose.
+        Assert.Equal(PlayerObject.DeadPoseAnimation, deadPlayer[^13]);
+        Assert.Equal(0, deadPlayer[^12]);
+        Assert.Equal(alivePlayer[^11..], deadPlayer[^11..]);
+
+        byte[] aliveMonster = new MonsterObject(10, 20, Life: 15, MonsterObject.BaseComponents) { ActorStance = 2 }.Blob();
+        byte[] deadMonster = new MonsterObject(10, 20, Life: 0, MonsterObject.BaseComponents) { ActorStance = 2, DeadPoseClip = 1 }.Blob();
+        Assert.Equal(aliveMonster.Length + 2, deadMonster.Length);
+        Assert.Equal(2, deadMonster[^14]);
+        Assert.Equal(PlayerObject.DeadPoseAnimation, deadMonster[^13]);
+        Assert.Equal(1, deadMonster[^12]);
+        Assert.Equal(aliveMonster[^11..], deadMonster[^11..]);
+    }
+
+    [Fact]
+    public void Component_updates_encode_shrine_ground_effect_and_beam_layouts()
+    {
+        // Shrine 0x2bc (component 7): key (row | 0x80), state 0, extra 0, u32 LE taker id.
+        byte[] shrine = InstanceEntities.ShrineUpdate(0x2000, 11, 0x1000, claimed: true);
+        Assert.Equal("02BC" + "00002000" + "00000000" + "0000" + "0008" + "07" + "8B" + "00" + "00" + "00100000",
+            Convert.ToHexString(shrine));
+
+        // GroundEffect 0x2bc (component 2): u8 state, f32 LE remaining seconds.
+        byte[] ground = InstanceEntities.GroundEffectUpdate(0x3000, 1, 2.5f);
+        Assert.Equal("02BC" + "00003000" + "00000000" + "0000" + "0006" + "02" + "01" + "00002040",
+            Convert.ToHexString(ground));
+
+        // Beam 0x2bc (component 4): matches the Beam section of BeamEffectObject.Blob().
+        var beamObj = new BeamEffectObject(1421, 612, 0x452, 14099.1f, 5936.7f, 0x4B9);
+        byte[] beam = InstanceEntities.BeamUpdate(0x4000, beamObj);
+        byte[] beamBody = beamObj.Blob()[19..^1];
+        Assert.Equal("02BC" + "00004000" + "00000000" + "0000" + (1 + beamBody.Length).ToString("X4") + "04" + Convert.ToHexString(beamBody),
+            Convert.ToHexString(beam));
+    }
+
+    [Fact]
+    public void Action_update_0x2c8_encodes_action_header_and_flame_dash_tail()
+    {
+        byte[] tail = new BlobWriter().I32(10).I32(20).I32(30).I32(40).F32(4.0f).ToArray();
+        byte[] packet = InstanceProtocol.ActionUpdate(0x1000, 0x5CCD, 0x0104, 0x0007, tail);
+        Assert.Equal(
+            "02C8" + "00001000" + "00000000" + "0000" + "5CCD" + "0104" + "0007" + "00" + "0014"
+            + "0A000000" + "14000000" + "1E000000" + "28000000" + "00008040",
+            Convert.ToHexString(packet));
+    }
+
+    [Fact]
+    public void Combat_and_action_delta_encoders_match_3293c_wire_layouts()
+    {
+        Assert.Equal("00C6010203040000002D", Convert.ToHexString(InstanceItems.FlaskCharges(0x01020304, 45)));
+        Assert.Equal("0174000000010000004201", Convert.ToHexString(InstanceItems.ItemUseResult(1, 0x42, 1)));
+        Assert.Equal("00BB03", Convert.ToHexString(InstanceProtocol.FreezeActions(frozen: true, notify: true)));
+        Assert.Equal("00BC00", Convert.ToHexString(InstanceProtocol.ActionLockout(active: false)));
+        Assert.Equal("00BC0105", Convert.ToHexString(InstanceProtocol.ActionLockout(active: true, durationSeconds: 5)));
+        Assert.Equal("01C91122334401230007", Convert.ToHexString(InstanceProtocol.PlaySoundEffect(0x11223344, 0x0123, 7)));
+
+        // 0x01ca MiscObjectSpawn: entity-attached + offset vs world coords + delay + rotation.
+        Assert.Equal("01CA0455AA0000004D000AFFFB",
+            Convert.ToHexString(InstanceEntities.MiscObjectSpawn(0x55AA, entityId: 77, offset: (10, -5))));
+        Assert.Equal("01CA63123400000064000000C8000001F43FC00000",
+            Convert.ToHexString(InstanceEntities.MiscObjectSpawn(0x1234, miscAnimated: true, coords: (100, 200), delayMs: 500, rotation: 1.5f)));
+
+        // 0x02d9 EntityVariantDelta: all 3 tagged LE variant arms plus position-only and bare entries.
+        byte[] delta = InstanceEntities.EntityVariantDelta(1, [
+            new(0x1000, 2, (10, 20), EntityVariantValue.Tag0(0x1234)),
+            new(0x2000, 0, Variant: EntityVariantValue.Tag1(0x11223344)),
+            new(0x3000, 0, Variant: EntityVariantValue.Tag2(0x5678)),
+        ]);
+        Assert.Equal(
+            "02D9" + "01" + "03"
+            + "00001000" + "8002" + "0000000A" + "00000014" + "00" + "3412"
+            + "00002000" + "8000" + "01" + "44332211"
+            + "00003000" + "8000" + "02" + "7856",
+            Convert.ToHexString(delta));
+    }
+
+    [Fact]
+    public void PlayerSkillsChangeBatches_and_FitSkillList_split_oversized_skill_lists_under_u16_limit()
+    {
+        var heavyStats = Enumerable.Range(1, 1000).Select(i => ((uint)(1000 + i), i * 3)).ToArray();
+        var skills = Enumerable.Range(0, 24)
+            .Select(i => new GrantedSkill((ushort)(0x0102 + i), 4394, 4320, heavyStats))
+            .ToArray();
+
+        // Single PlayerSkillsChange overflows the 65,535-byte u16 ComponentUpdate Blob header.
+        Assert.Throws<OverflowException>(() => InstanceEntities.PlayerSkillsChange(0x1000, skills, [0x0103]));
+
+        byte[][] batches = InstanceEntities.PlayerSkillsChangeBatches(0x1000, skills, [0x0103],
+            soulSeeds: [new(12, 50)], soulUpdates: [new(12, 10, 50)], canDetonateMines: true);
+        Assert.True(batches.Length >= 2);
+        int totalSkillsEncoded = 0;
+        for (int b = 0; b < batches.Length; b++)
+        {
+            byte[] pkt = batches[b];
+            Assert.Equal(0x02, pkt[0]);
+            Assert.Equal(0xbc, pkt[1]);
+            int blobLen = (pkt[12] << 8) | pkt[13];
+            Assert.Equal(pkt.Length - 14, blobLen);
+            Assert.InRange(blobLen, 1, InstanceEntities.MaxSkillBlobBytes);
+            Assert.Equal(PlayerObject.ActorComponentIndex, pkt[14]);
+            Assert.Equal(0xa0, pkt[15]);
+            totalSkillsEncoded += pkt[17];
+            Assert.Equal(b == batches.Length - 1 ? 1 : 0, pkt[18]);
+        }
+        Assert.Equal(skills.Length, totalSkillsEncoded);
+
+        // PlayerObject.Blob() with 24 heavy skills exceeds 65,535 bytes; FitSkillList splits cleanly.
+        var fullPlayer = new PlayerObject("Exile", ClassIndex: 1, GridX: 10, GridY: 10, Life: 100, Mana: 50,
+            AnimatedObject: "Metadata/Characters/Int/Int", Skills: skills, Stats: [(1, 10)]);
+        Assert.Throws<OverflowException>(() => InstanceEntities.CreateObject(0x1000, 0x1234, fullPlayer.Blob()));
+
+        var (fitted, overflow) = fullPlayer.FitSkillList(out byte[] fittedBlob);
+        Assert.NotEmpty(fitted.Skills!);
+        Assert.NotEmpty(overflow);
+        Assert.Equal(skills.Length, fitted.Skills!.Count + overflow.Count);
+        Assert.Equal(skills.Select(s => s.Id), fitted.Skills.Concat(overflow).Select(s => s.Id));
+        Assert.Equal(fitted.Blob(), fittedBlob);
+        byte[] createPkt = InstanceEntities.CreateObject(0x1000, 0x1234, fittedBlob);
+        int createBlobLen = (createPkt[16] << 8) | createPkt[17];
+        Assert.Equal(createPkt.Length - 18, createBlobLen);
+        Assert.InRange(createBlobLen, 1, InstanceEntities.MaxSkillBlobBytes);
+
+        // More than 255 light skills (fitting in < 56 KB) still split at 255 so u8 count never wraps;
+        // and tight maxBlobBytes with empty Souls never exceeds maxBlobBytes by the 6-byte skill-list header.
+        var lightSkills = Enumerable.Range(0, 260)
+            .Select(i => new GrantedSkill((ushort)(0x0102 + i), 4394, 4320, []))
+            .ToArray();
+        var manyLightPlayer = fullPlayer with { Skills = lightSkills, Souls = null };
+        var (lightFitted, lightOverflow) = manyLightPlayer.FitSkillList(out byte[] lightBlob);
+        Assert.Equal(255, lightFitted.Skills!.Count);
+        Assert.Equal(5, lightOverflow.Count);
+        Assert.Equal(lightFitted.Blob(), lightBlob);
+
+        int tightLimit = (manyLightPlayer with { Skills = [.. lightSkills.Take(5)] }).Blob().Length;
+        var (tightFitted, tightOverflow) = manyLightPlayer.FitSkillList(out byte[] tightBlob, maxBlobBytes: tightLimit);
+        Assert.Equal(5, tightFitted.Skills!.Count);
+        Assert.Equal(255, tightOverflow.Count);
+        Assert.Equal(tightLimit, tightBlob.Length);
+
+        // > 255 removed skill IDs split into <= 255-entry trailing batches; last skill + oversized tail splits cleanly.
+        ushort[] manyRemoved = Enumerable.Range(0, 260).Select(i => (ushort)(0x0200 + i)).ToArray();
+        byte[][] removedBatches = InstanceEntities.PlayerSkillsChangeBatches(0x1000, [lightSkills[0]], manyRemoved,
+            soulSeeds: [new(12, 50)], soulUpdates: [new(12, 10, 50)]);
+        Assert.True(removedBatches.Length >= 3);
+        Assert.Equal(1, removedBatches.Sum(p => p[17]));
+        Assert.Equal(260, removedBatches.Sum(p => p[18]));
+        Assert.All(removedBatches, p => Assert.InRange((p[12] << 8) | p[13], 1, InstanceEntities.MaxSkillBlobBytes));
+
+        int oneHeavyLen = InstanceEntities.PlayerSkillsChange(0x1000, [skills[0]], []).Length - 14;
+        byte[][] tailSplit = InstanceEntities.PlayerSkillsChangeBatches(0x1000, [skills[0]], [0x0103, 0x0104],
+            soulSeeds: [new(12, 50)], soulUpdates: [new(12, 10, 50)], maxBlobBytes: oneHeavyLen + 2);
+        Assert.Equal(2, tailSplit.Length);
+        Assert.Equal(1, tailSplit[0][17]);
+        Assert.Equal(0, tailSplit[0][18]);
+        Assert.Equal(0, tailSplit[1][17]);
+        Assert.Equal(2, tailSplit[1][18]);
+        Assert.All(tailSplit, p => Assert.InRange((p[12] << 8) | p[13], 1, oneHeavyLen + 2));
     }
 }

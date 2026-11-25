@@ -14,6 +14,49 @@ public sealed record PlacedArmRoom(string Path, int X, int Y, int Width, int Hei
 /// <see cref="AreaObjects.RoomObjects"/> returns.</summary>
 public sealed record PlacedLink(int From, int To, string Name);
 
+/// <summary>Compact read-only lookup of each tile corner's ground type name (.gt first line) for a generated
+/// <see cref="TileGrid"/>. Derived purely after generation with zero RNG draws.</summary>
+public sealed record TileGrounds(int TileWidth, int TileHeight, string[] Palette, byte[] Corners)
+{
+    /// <summary>Ground name at the tile corner nearest to grid cell (<paramref name="cellX"/>, <paramref name="cellY"/>), or null.</summary>
+    public string? AtCell(int cellX, int cellY)
+    {
+        if (TileWidth <= 0 || TileHeight <= 0 || Palette.Length == 0) return null;
+        int vx = Math.Clamp((cellX + 11) / 23, 0, TileWidth);
+        int vy = Math.Clamp((cellY + 11) / 23, 0, TileHeight);
+        byte idx = Corners[vy * (TileWidth + 1) + vx];
+        return idx < Palette.Length ? Palette[idx] : null;
+    }
+
+    /// <summary>True when any corner of the tile covering (<paramref name="cellX"/>, <paramref name="cellY"/>) matches one of <paramref name="grounds"/>.</summary>
+    public bool CellMatchesAny(int cellX, int cellY, IReadOnlyList<string> grounds)
+    {
+        if (TileWidth <= 0 || TileHeight <= 0 || Palette.Length == 0 || grounds.Count == 0) return false;
+        int tx = Math.Clamp(cellX / 23, 0, TileWidth - 1);
+        int ty = Math.Clamp(cellY / 23, 0, TileHeight - 1);
+        int stride = TileWidth + 1;
+        for (int dy = 0; dy <= 1; dy++)
+            for (int dx = 0; dx <= 1; dx++)
+            {
+                byte idx = Corners[(ty + dy) * stride + (tx + dx)];
+                if (idx >= Palette.Length) continue;
+                string g = Palette[idx];
+                for (int i = 0; i < grounds.Count; i++)
+                    if (string.Equals(g, grounds[i], StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        return false;
+    }
+
+    /// <summary>True when the corner nearest to (<paramref name="cellX"/>, <paramref name="cellY"/>) matches an excluded ground.</summary>
+    public bool CellExcluded(int cellX, int cellY, IReadOnlyList<string> grounds)
+    {
+        if (grounds.Count == 0 || AtCell(cellX, cellY) is not { } g) return false;
+        for (int i = 0; i < grounds.Count; i++)
+            if (string.Equals(g, grounds[i], StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+}
+
 /// <summary>The area transitions and waypoints of a generated grid, placed as <see cref="DoodadStage"/>'s tile lines
 /// place tile objects (<c>0x142047a50</c>): row by row, every tile origin's objects (the record master's Reskin copy
 /// when there is one; per sub-tile for a tile made of them), then the .tmd the .tdt names (+0x180), turned by the
@@ -52,8 +95,11 @@ public static class AreaObjects
         return rooms;
     }
 
+    /// <remarks>The model is the one the client gives the record (<see cref="ClientModel"/>): The Sovereign's waypoint
+    /// record DeepwaterHubBoat_waypoint names Deepwater/Waypoint/waypoint.ao, and its virtual
+    /// DeepwaterHubBoat_waypoint.ao is no file.</remarks>
     public static List<PlacedTileObject> Transitions(TerrainCache files, GenerationResult result) =>
-        Place(files, result, t => files.IsTransitionType(t) || IsEffect(t), tile => files.HasTransition(tile));
+        Place(files, result, t => files.IsTransitionType(t) || IsEffect(t), tile => files.HasTransition(tile), (o, tdt) => ClientModel(files, o, tdt));
 
     /// <summary>The waypoints a placed .arm room holds as a server object line (type <c>Waypoint</c>) instead of a tile
     /// object: The Ledge's <c>Act1/Area5/Rooms/waypoint.arm</c>. Not in the recorder's .transitions.json (it records tile
@@ -82,10 +128,8 @@ public static class AreaObjects
                 int code = room.Orientation;
                 int Add(string type, string model, float x, float y, float rawAngle, float z, float scale = 1, bool flip = false)
                 {
-                    var (cx, cy) = Orientation.Map(code, (int)x, (int)y, room.Room.Width * 23, room.Room.Height * 23);
-                    float angle = code is >= 4 and < 8 ? MathF.PI * 2 - rawAngle : rawAngle;
-                    angle = (angle + (code & 3) * (MathF.PI / 2)) % (MathF.PI * 2);
-                    var o = new PlacedTileObject(type, model, room.X * 23 + cx, room.Y * 23 + cy, angle, z, code, scale, flip);
+                    var (px, py, angle) = Place(room, x, y, rawAngle);
+                    var o = new PlacedTileObject(type, model, px, py, angle, z, code, scale, flip);
                     int at = placed.IndexOf(o);
                     if (at >= 0) return at;
                     placed.Add(o);
@@ -104,6 +148,22 @@ public static class AreaObjects
         return placed;
     }
 
+    /// <summary>A room line's or point's cell and angle in the level, as <see cref="DoodadStage"/>'s room lines place them
+    /// (<c>0x142046fc0</c>): the cell turned by the room's code, the angle mirrored for codes 4–7 plus (code &amp; 3)·π/2.</summary>
+    public static (int X, int Y, float Angle) Place(PlacedRoom room, float x, float y, float rawAngle)
+    {
+        int code = room.Orientation;
+        var (cx, cy) = Orientation.Map(code, (int)x, (int)y, room.Room.Width * 23, room.Room.Height * 23);
+        float angle = code is >= 4 and < 8 ? MathF.PI * 2 - rawAngle : rawAngle;
+        angle = (angle + (code & 3) * (MathF.PI / 2)) % (MathF.PI * 2);
+        return (room.X * 23 + cx, room.Y * 23 + cy, angle);
+    }
+
+    /// <summary>Where the player arrives in a level whose terrain plugin marks a start room (<see cref="GenerationResult.Start"/>):
+    /// that room's <c>default</c> point, placed; null without a start room or point.</summary>
+    public static (int X, int Y, float Angle)? Start(GenerationResult result) =>
+        result.Start is { } room && room.Room.Points.FirstOrDefault(p => p.Name == "default") is { } p ? Place(room, p.X, p.Y, p.Angle) : null;
+
     const string DoodadType = "Metadata/MiscellaneousObjects/Doodad";
 
     const string WaypointType = "Metadata/MiscellaneousObjects/Waypoint";
@@ -118,8 +178,44 @@ public static class AreaObjects
     /// dungeon_bossrelease_v01_01_ball_replacement record: a static mesh, and bossrelease.ao with the animation its .ot
     /// plays on creation) is placed with that .ao, as the doodad stage takes it; live, the static model hung the client.</remarks>
     public static List<PlacedTileObject> TileObjects(TerrainCache files, GenerationResult result, Func<string, bool> keep) =>
-        Place(files, result, keep, _ => false, (o, tdt) => files.Text(o.VirtualModel(tdt)) is null
-            && o.Animation is { } ao && ao.EndsWith(".ao", StringComparison.OrdinalIgnoreCase) ? ao : o.VirtualModel(tdt));
+        Place(files, result, keep, _ => false, (o, tdt) => ClientModel(files, o, tdt));
+
+    /// <summary>Compact read-only ground type name grid derived from the already-placed <see cref="TileGrid"/> corners
+    /// (zero RNG draws, zero grid mutation).</summary>
+    public static TileGrounds Grounds(TerrainCache files, GenerationResult result)
+    {
+        var grid = result.Grid;
+        int w = grid.Width, h = grid.Height;
+        int stride = w + 1;
+        var corners = new byte[(w + 1) * (h + 1)];
+        var palette = new List<string>();
+        var index = new Dictionary<string, byte>(StringComparer.Ordinal);
+        for (int vy = 0; vy <= h; vy++)
+            for (int vx = 0; vx <= w; vx++)
+            {
+                string? name = grid.Corner(vx, vy).Ground is { } path ? files.Ground(path)?.Name : null;
+                if (string.IsNullOrEmpty(name))
+                {
+                    corners[vy * stride + vx] = byte.MaxValue;
+                    continue;
+                }
+                if (!index.TryGetValue(name, out byte id))
+                {
+                    if (palette.Count >= byte.MaxValue) { corners[vy * stride + vx] = byte.MaxValue; continue; }
+                    id = (byte)palette.Count;
+                    palette.Add(name);
+                    index[name] = id;
+                }
+                corners[vy * stride + vx] = id;
+            }
+        return new TileGrounds(w, h, [.. palette], corners);
+    }
+
+    // The record's model as the client holds it (record +0x38, which 0x142047e30 places): the virtual
+    // "<.tdt folder>/<name>.ao" when that file exists, else the .ao the record names.
+    static string ClientModel(TerrainCache files, TileObject o, string tdt) =>
+        files.Text(o.VirtualModel(tdt)) is null && o.Animation is { } ao && ao.EndsWith(".ao", StringComparison.OrdinalIgnoreCase)
+            ? ao : o.VirtualModel(tdt);
 
     // The tile objects of the types kept; a tile is looked at when it has one of them (has) or an effect.
     static List<PlacedTileObject> Place(TerrainCache files, GenerationResult result, Func<string, bool> keep, Func<TileDef, bool> has,

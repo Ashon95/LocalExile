@@ -19,15 +19,20 @@ public sealed class WorldObject
     public readonly WorldOutput Owner;
     public BirthState State;
     public bool RemovalRequested;
+    /// <summary>Whether this object's create was admitted/written through this connection's own output rather than only
+    /// marked ready via shared AreaDelta (which may drain before a newly-joining client receives its first frame).</summary>
+    public bool Direct;
     public readonly TaskCompletionSource<bool> Invalidated = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly TaskCompletionSource<bool> Removal = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly TaskCompletionSource<bool> Birth = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public WorldObject(WorldOutput owner, uint id, bool ready)
+    public WorldObject(WorldOutput owner, uint id, bool ready, bool placeholder = false)
     {
-        Owner = owner; Id = id; State = ready ? BirthState.Ready : BirthState.Reserved;
+        Owner = owner; Id = id; State = ready ? BirthState.Ready : BirthState.Reserved; Placeholder = placeholder;
         if (ready) Birth.SetResult(true);
     }
     public uint Id { get; }
+    /// <summary>Inserted by a record that named an ID before this connection saw its create; the real create retires it.</summary>
+    public bool Placeholder { get; }
     public long? CreationFrame { get; set; }
     public bool IsReady => Owner.IsReady(this);
     /// <summary>Cancel an unadmitted reservation. Published/admitted objects require an explicit Remove record.</summary>
@@ -149,7 +154,14 @@ public sealed class WorldOutput
         lock (sync)
         {
             ObjectDisposedException.ThrowIf(closed, this);
-            if (objects.ContainsKey(id)) throw new InvalidOperationException("World object ID is still reserved or published; await its removal before replacement.");
+            if (objects.TryGetValue(id, out var existing))
+            {
+                // A record for an unseen ID may have inserted a placeholder before this create was queued. It never
+                // reached the client, so the create replaces it instead of failing the connection.
+                if (!existing.Placeholder)
+                    throw new InvalidOperationException("World object ID is still reserved or published; await its removal before replacement.");
+                Retire(existing);
+            }
             var birth = new WorldObject(this, id, false); objects.Add(id, birth); return birth;
         }
     }
@@ -160,16 +172,34 @@ public sealed class WorldOutput
         {
             ObjectDisposedException.ThrowIf(closed, this);
             if (objects.ContainsKey(id)) throw new InvalidOperationException("World object ID already has an incarnation.");
-            var established = new WorldObject(this, id, true); objects.Add(id, established); return established;
+            var established = new WorldObject(this, id, true) { Direct = true }; objects.Add(id, established); return established;
         }
     }
+    /// <summary>Whether the id has an incarnation in this output: a create reserved, admitted or published. One without
+    /// is not known to have been created yet: <see cref="PublishedObject"/> would take it as established, and a create
+    /// still to come (a kill's queued drop) would then fail.</summary>
+    public bool Has(uint id)
+    {
+        lock (sync) return objects.ContainsKey(id);
+    }
+
+    /// <summary>Whether this connection's own output has admitted or written a create for <paramref name="id"/>.</summary>
+    public bool HasDirect(uint id)
+    {
+        lock (sync) return objects.TryGetValue(id, out var target) && target.Direct;
+    }
+
     // The caller identifies an already published object. A pending birth is returned as pending, never bypassed.
     public WorldObject PublishedObject(uint id)
     {
         lock (sync)
         {
+            ObjectDisposedException.ThrowIf(closed, this);
             if (objects.TryGetValue(id, out var value)) return value;
-            return ExistingObject(id);
+            // A record may name an ID whose create is still queued behind it (a pickup racing a drop). Keep a
+            // placeholder that the real create retires, so the record can still be admitted without blocking that create.
+            var placeholder = new WorldObject(this, id, true, placeholder: true);
+            objects.Add(id, placeholder); return placeholder;
         }
     }
 
@@ -217,7 +247,7 @@ public sealed class WorldOutput
         lock (sync)
         {
             CheckOwner(target);
-            if (target.State is WorldObject.BirthState.Admitted or WorldObject.BirthState.Ready)
+            if (!target.Placeholder && target.State is WorldObject.BirthState.Admitted or WorldObject.BirthState.Ready)
                 throw new InvalidOperationException("An admitted object needs an explicit Remove record; accepted creation/presentation cannot be cancelled.");
             target.State = WorldObject.BirthState.Retired;
             if (objects.GetValueOrDefault(target.Id) == target) objects.Remove(target.Id);
@@ -251,12 +281,43 @@ public sealed class WorldOutput
         }
     }
 
-    // Called under SendGate. Validate the complete batch before admitting any of it.
-    public IReadOnlyList<Packet> Admit(OutputBatch batch, WorldAdmission admission, bool framed)
+    /// <summary>A batch that goes to the area's frame (AreaDelta) instead of this output: its births and removals are
+    /// done here at once (the area writes them to every connection in order), so nothing waits on them.</summary>
+    public void Shared(OutputBatch batch, WorldAdmission admission)
+    {
+        if (!TryShared(batch, admission)) throw new ObjectDisposedException(nameof(WorldOutput));
+    }
+
+    internal bool TryShared(OutputBatch batch, WorldAdmission admission)
+    {
+        var born = new List<WorldObject>();
+        var removed = new List<WorldObject>();
+        lock (sync)
+        {
+            if (closed) return false;
+            foreach (var birth in admission.Births) { birth.State = WorldObject.BirthState.Ready; born.Add(birth); }
+            foreach (var record in batch.Records)
+                if (record.Kind == OutputRecord.RecordKind.Remove && record.Object is { } target && ReferenceEquals(target.Owner, this))
+                {
+                    target.State = WorldObject.BirthState.Retired;
+                    if (objects.GetValueOrDefault(target.Id) == target) objects.Remove(target.Id);
+                    removed.Add(target);
+                }
+        }
+        foreach (var birth in born) birth.Birth.TrySetResult(true);
+        foreach (var target in removed) { target.Invalidated.TrySetResult(false); target.Removal.TrySetResult(true); }
+        return true;
+    }
+
+    public IReadOnlyList<Packet> Admit(OutputBatch batch, WorldAdmission admission, bool framed) =>
+        TryAdmit(batch, admission, framed) ?? throw new ObjectDisposedException(nameof(WorldOutput));
+
+    // Called under SendGate. Refuse a retired connection atomically with admission under the state lock.
+    internal IReadOnlyList<Packet>? TryAdmit(OutputBatch batch, WorldAdmission admission, bool framed)
     {
         lock (sync)
         {
-            ObjectDisposedException.ThrowIf(closed, this);
+            if (closed) return null;
             var births = admission.Births;
             if (births.Distinct().Count() != births.Count) throw new ArgumentException("Duplicate birth declaration.");
             foreach (var birth in births)
@@ -303,7 +364,7 @@ public sealed class WorldOutput
                     }
                 }
             }
-            foreach (var birth in births) { birth.State = WorldObject.BirthState.Admitted; birth.CreationFrame = framed ? number : null; }
+            foreach (var birth in births) { birth.State = WorldObject.BirthState.Admitted; birth.Direct = true; birth.CreationFrame = framed ? number : null; }
             foreach (var target in removing) { target.RemovalRequested = true; target.Invalidated.TrySetResult(false); }
             List<Packet> immediate = [];
             foreach (var record in records)

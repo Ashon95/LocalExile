@@ -5,6 +5,8 @@
 `GemSupports` reads native GrantedEffects, ActiveSkills and GrantedEffectsPerLevel tables.
 Physical support gems only affect usable gems in the same equipped item and link group.
 Item mods also contribute the support effects referenced by their `GrantedEffectsPerLevelKeys` to gems in that item.
+`SupportsGemsOnly` is retained from GrantedEffects. It excludes meta supports from item-granted non-gem actives while
+leaving them available to real skill gems.
 These item supports do not require links and pass through the same compatibility and duplicate-family resolver.
 The Squire's mod adds every support gem in the active off-hand, unlinked, to the main hand's gems (verified live).
 An unambiguous displayed support-level stat uses the item's rolled value, including developer-set levels.
@@ -51,7 +53,9 @@ take `support_lifetap_damage_+%_final_while_buffed` and flasks recover 20% incre
 same Life cost.
 The Blood Magic keystone (the passive tree node or an item's `keystone_blood_magic`, for example Malachai's Awakening)
 converts every skill's whole Mana cost to Life the same way, without Lifetap's multiplier, counter or buff; a skill is
-refused when its Life cost is not below current Life. Mana reservation is unchanged.
+refused when its Life cost is not below current Life. It also removes all Mana (maximum 0, like `no_mana` and
+`base_no_mana`), gives 10% more maximum Life and moves every skill's Mana reservation to Life. Only the reminder text
+(`ReminderTextKeystoneBloodMagic`) states these: the node and the item mods carry just `keystone_blood_magic`.
 Overheat Support consumes all of the player's Fortification once per use, at the start of the use (before its hit or
 any projectile it releases), and stores per skill `(1 + per_3 * floor(consumed / 3) / 100)` as more Ailment damage for
 that use's ailments. It is an exceptional gem: `support_overheat_ailment_damage_+%_final_per_3_fortification_consumed`
@@ -82,9 +86,13 @@ A boss stage that the hit starts, or one still running, keeps the boss alive, an
 Executioner archnemesis mod) stops the cull.
 The support's quality stat `recover_%_maximum_life_on_cull` (0.1 per 1% quality) recovers that share of maximum Life
 on a cull, applied at once and sent with the next vitals update like instant leech.
-Hits from minions, warcries, passive-granted skills and Rampage do not cull yet, nor do the conditional sources
-(against bleeding, burning, frozen, cursed or marked enemies, bow attacks, weapon-local critical strikes, flasks), the
-flat Life and Mana gained on cull, or the "Culled Recently" stats.
+Hits from minions, warcries, passive-granted skills and Rampage do not cull yet, nor do the bow-attack, cleave,
+tincture, weapon-local (critical, bleeding and crit-recently), flask and stun conditional sources, the "Culled
+Recently" stats or the onslaught buff on cull. The target-state conditional sources (burning — including Righteous
+Fire's own burn — frozen, cursed, marked and poacher's-marked enemies, and a hit that leaves the enemy under 10% Life)
+now cull at 10%, and flat Life and Mana gained on cull are granted. The weapon-local bleeding source
+(`local/main_hand/off_hand_culling_strike_vs_bleeding_enemies`) needs the hit's weapon context and remains outside
+this implementation.
 
 Green supports with a condition or an execution of their own now run: Cull the Weak culls normal and magic enemies at
 `kill_normal_or_magic_enemy_on_hit_if_under_x%_life` (Culling Strike's share still applies to every rarity), Pacifism's
@@ -128,7 +136,7 @@ raises the supported gem's level like the generic `supported_active_skill_gem_le
 `chance_to_crush_on_hit_%` crushes for 4 s and a crushed monster's physical damage reduction is 15% lower
 (BuffDefinitions `crushed`); Awakened Spell Echo's `spell_echo_plus_chance_double_damage_%_final` rolls only on the final
 repeat; Awakened Generosity's `non_curse_aura_effect_+%` scales the aura it supports, and its `aura_cannot_affect_self`
-keeps that aura out of the player's stats (the buff icon still shows, and an enemy-debuff aura such as Pride still
+keeps that aura out of the player's stats (the buff icon is not shown, and an enemy-debuff aura such as Pride still
 applies).
 Cruelty Support grants its buff on a hit of a supported skill: `CrueltyPctFor` computes `round(100 * (1 + cruelty_effect_+%/100) * (D/L)^0.2)`
 from the hit's damage `D` (capped at the life the target could lose) and the monster's maximum life `L`, capped at 40%.
@@ -202,7 +210,10 @@ the original player cast's first valid release (including Fireball/Spark), share
 Its added chaos enters raw spell damage before effectiveness, conversion, increases, more and damage prohibitions;
 unreleased cancelled, replaced-source or retired casts pay nothing. Payment publishes current life/reservation;
 area poison uses the same added chaos base. Source identity survives gem experience/level-lock edits, not replacement.
-Proxy/trigger executors must supply their own actual caster and never reuse the player payment; Spellblade adds its share of the one-hand melee weapon as spell damage; Hallow's Hallowing Flame gives
+Proxy/trigger executors must supply their own actual caster and never reuse the player payment.
+Spellblade (Stat 18860) adds the one-hand melee weapons' own damage, not global attack additions. The main hand must
+be one; with two weapons each counts 60%, floored per hand before spell effectiveness (as PoB).
+Hallow's Hallowing Flame gives
 the next attack 25% of its physical damage as extra fire (scaled by the magnitude stat, then removed); and Excommunicate
 suppresses an excommunicated monster's chaos damage for its 3 seconds.
 
@@ -301,9 +312,24 @@ Guard cooldown recovery begins when the buff ends; guard damage absorption prece
 CoC alternates linked executable spells after an accepted attack critical hit, with native per-effect cooldown
 and separate spell payment; attacks retain manual use. CwC uses its native interval on the projectile pump,
 independently of the channel's hit/payment cadence, and drops future work when the paid channel becomes invalid.
+Cast on Melee Kill shares CoC's release (rotation, cooldown, payment) after a linked melee attack's own hit kills a
+hostile monster; kills by its ailments, by other skills or by minions do not count.
 Other generic triggers remain unavailable.
 Queued triggers retain stable source gem identity and the support configuration. XP/lock edits retain identity;
 actual gem swaps or changed levels/links cancel queued work. Reused skill IDs alone are insufficient identity. Pause freezes pending work without erasing the counter.
 Triggered roots use server projectile objects because there is no local input action to predict them.
+Such an object plays its rig's impact clip where it stops (`projectile_clips`, Fireball's `fireball_explode`) and stays
+for the clip's length; removed at once it showed no explosion, which the client plays itself for its own cast.
+A server effect object (`PermanentServerEffect`) does not start its `.ao`'s `default_animation`: Toxic Rain's pod stood
+still and its shoot-up art drew nothing until a clip was sent (Animated bit 3 at creation, or `0x1b2`; live 2026-11-17).
+Clip indices are the rig's (`.amd`) order, which is by name:
+`rain_of_spores/pods/rig.amd` grow_fast_01 0, grow_slow_01 1, grow_slow_explode_01..03 2-4 (966 ms; `BloomPod.ot` plays
+1 when the pod is made and one of 2-4 on its transition, and every skin's pod extends that type);
+`ground_effects_v2/caustic_arrow_ground/rig.amd` fadein 0 (366 ms, the default), fadeout 1 (1500 ms), loop 2;
+`Microtransactions/spell/poison_arrow/rig.amd` cloudbegone 0 (2083 ms), cloudemerge 1 (833 ms), cloudstuff 2.
+GroundEffects names a ground's loop (`__col8`) and end clip (`EndEffect`); `__col1` is its art variation, which a skill
+effect sets through `ground_caustic_art_variation` (Caustic Arrow's own is 2, Celestial 7, Oblivion 13).
+The falling arrow of a rain skill is one clip, index 0, that reaches the ground part-way in: `spore_drop.ao` at 0.224 s,
+`rain_of_arrows/rig.ao` (no default animation) at 0.218 s, `blast_rain/arrow_drop.ao` at its contact, 0.333 s.
 The existing spell volley and Spark wander/duration specialization still runs before server presentation is selected.
 Native targeting, visual parity and threshold timing require client verification.

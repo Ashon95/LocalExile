@@ -6,9 +6,11 @@ using GameServer.Core.World;
 public static partial class Game
 {
     // Monsters are shared by the instance. Count the vines of every caster when updating movement.
-    sealed class ToxicPod(int slow, int cap)
+    sealed class ToxicPod(int slow, int cap, double until, double? withered)
     {
         public readonly int Slow = slow, Cap = cap;
+        public readonly double Until = until;
+        public readonly double? Withered = withered;
     }
     static readonly RuleTable<SpawnedMonster, HashSet<ToxicPod>> ToxicVines = new();
 
@@ -33,14 +35,19 @@ public static partial class Game
         readonly ConditionalWeakTable<SpawnedMonster, PodDamage> dotRemainders = new();
         sealed class PodDamage { public double Fraction; }
 
-        internal void RainArt(ProjectileVector at, string? ao, double duration, double? radius = null)
+        internal void RainArt(ProjectileVector at, string? ao, double duration, double? radius = null, float rotation = 0,
+            uint? clip = null, (uint Clip, double Seconds)? endClip = null)
         {
-            if (ao is not null) Effect((int)Math.Round(at.X), (int)Math.Round(at.Y), ao, ProjectileRuntime.Time(duration), radius);
+            if (ao is not null) Effect((int)Math.Round(at.X), (int)Math.Round(at.Y), ao, ProjectileRuntime.Time(duration), radius,
+                rotation: rotation, startClip: clip,
+                endClip: endClip is { } end ? (end.Clip, ProjectileRuntime.Time(end.Seconds)) : null);
         }
 
         void LeavePod(ToxicPod pod, SpawnedMonster m)
         {
-            if (ToxicVines.TryGetValue(m, out var pods)) lock (pods) pods.Remove(pod);
+            if (!ToxicVines.TryGetValue(m, out var pods)) return;
+            lock (pods) pods.Remove(pod);
+            if (pod.Withered is not null) m.PresentationChanged?.Invoke();
         }
 
         void ClearPods()
@@ -51,18 +58,18 @@ public static partial class Game
         }
 
         internal void PlaceToxicPod(ProjectileUse use, ProjectileVector centre, int radius, double duration,
-            double dps, int slow, int cap, string? burst)
+            double dps, int slow, int cap, string? burst, double? withered = null)
         {
-            var pod = new ToxicPod(slow, cap);
-            var victims = podVictims[pod] = [];
             long previous = Runtime.Now, end = previous + Math.Max(1, ProjectileRuntime.Time(duration));
+            var pod = new ToxicPod(slow, cap, end / (double)ProjectileRuntime.QuantaPerSecond, withered);
+            var victims = podVictims[pod] = [];
             void Tick()
             {
                 long now = Runtime.Now;
                 double at = now / (double)ProjectileRuntime.QuantaPerSecond;
                 double seconds = (now - previous) / (double)ProjectileRuntime.QuantaPerSecond;
                 previous = now;
-                foreach (var (id, monster) in Conn.Monsters.ToArray())
+                foreach (var (id, monster) in Player.Area.Monsters.ToArray())
                 {
                     bool inside = monster.Hostile && !monster.Dead && monster.Life > 0
                         && (Vector(monster.Walk.Position(at)) - centre).Length <= radius;
@@ -75,24 +82,32 @@ public static partial class Game
                     {
                         var vines = ToxicVines.GetValue(monster, _ => new(ReferenceEqualityComparer.Instance));
                         lock (vines) vines.Add(pod);
+                        if (pod.Withered is not null) monster.PresentationChanged?.Invoke();
                     }
                     var carry = dotRemainders.GetValue(monster, _ => new PodDamage());
                     double total = carry.Fraction + seconds * dps * MonsterDotTaken(monster, DamageType.Chaos, at);
                     int damage = (int)Math.Clamp(Math.Floor(total), 0, int.MaxValue);
                     carry.Fraction = total - Math.Floor(total);
                     if (damage == 0) continue;
-                    var (life, stage) = TakeOwnerDamageLocked(Conn, monster, damage);
+                    int lifeDamage = ApplyMonsterDotEnergyShieldLocked(Player.Area, monster, damage, chaos: true, AreaTime(Player));
+                    var (life, stage) = lifeDamage > 0 ? TakeOwnerDamageLocked(Player, monster, lifeDamage) : (monster.Life, false);
                     monster.Life = life;
                     monster.Aggro = life > 0;
                     if (stage) CommitProjectileBossStage(this, id, monster, now);
-                    World(id, InstanceProtocol.LifeUpdate(id, life));
                     if (life == 0)
                     {
+                        SetStats(Player, id, [(Stat.HideMiniLifeBar, 1)]);
+                        if (DotDeathKind(monster, life) is var deathKind && deathKind != InstanceProtocol.DeathKindNormal)
+                            World(id, InstanceProtocol.LifeUpdate(id, life, u2c: deathKind,
+                                orderKey: Player.Connection.LockstepClient ? uint.MaxValue : 0u));
                         monster.Dead = true;
-                        monster.LastHitBy = Conn;
-                        CollectVaalSoulAtDeathLocked(Conn, monster);
-                        Enqueue(() => DotKilled(remote, stream, ciphers, Conn, id, monster));
+                        CleanupDeadMonsterLocked(Player.Area, id, monster);
+                        monster.LastHitBy = Player;
+                        CollectVaalSoulAtDeathLocked(Player, monster);
+                        Enqueue(() => DotKilled(Player, id, monster));
                     }
+                    else if (!Player.Connection.LockstepClient)
+                        World(id, InstanceProtocol.LifeUpdate(id, life));
                 }
                 if (now < end) Runtime.Schedule(Math.Min(end, now + ProjectileRuntime.QuantaPerSecond / 10), Tick);
                 else

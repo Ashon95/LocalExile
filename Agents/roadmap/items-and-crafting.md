@@ -6,10 +6,9 @@ Items keep the Roadmap's priority groups, and are in rough priority order within
 
 ## 1. Quality of life
 
-Essence item crafting is implemented (105 currencies, class-specific guaranteed modifiers;
-see Status and protocol/13-items.md).
-Imprisoned essence encounters, Remnant of Corruption on monsters and stash-tab essence upgrading remain separate
-features.
+Essence item crafting (105 currencies, class-specific guaranteed modifiers) and campaign/map imprisoned Essence
+encounters are implemented (see Status and protocol/13-items.md). Remnant of Corruption on monsters and stash-tab
+essence upgrading remain separate features.
 
 ## 3. Gameplay
 
@@ -30,11 +29,13 @@ features.
   (#60's follow-ups), and area and monster mods (#61).
   The Mud Flats glyphs are quest items (`Metadata/Items/QuestItems/Glyphs/Glyph1..3`,
   [12](../docs/protocol/12-quests.md)).
+  Divine Vessels capture Pantheon souls from matching Atlas map bosses into the Map Device for Sin's upgrades
+  ([pantheon](../docs/game/campaign/pantheon.md)).
 - **Start:** special mods and the uniques' own mechanics (#60, 13 §2e: `UniqueCatalog`
-  has every unique's base, mods and rolls, the mechanics behind those mods are the open part), chancing, and
-  Mageblood's follow-ups (buff icons, the "effects cannot be removed" backstop, the Foulborn rightmost variant).
+  has every unique's base, mods and rolls, the mechanics behind those mods are the open part), and chancing.
+  Mageblood's "effects cannot be removed" waits for a server mechanic that removes flask effects (13 §2e).
   Enkindling/Instilling transactions, charge lock and rare-hit automation have native acceptance; verify the other
-  automatic triggers natively and connect incoming Bleed/Poison sources when those mechanics exist.
+  automatic triggers with their ordinary hostile sources.
   Generated uniques, what is left after the poedb comparison of 2026-10-31 (13 §2e): Abyss socket layouts still lack
   generation rules (`Sockets:` lines are dropped); ordinary default sockets, Tabula's six linked whites, Skin of the
   Loyal's six linked random colours, the 3.29 no-white property, fixed "Has X Sockets" counts and Malachai's all-white
@@ -82,8 +83,7 @@ features.
   See Status and 13-items.md, "Sacred Orb" for the native checks and local roll distribution policy.
   Fracturing and Mirror have validated class/rarity admission (Fracturing uses `ItemClasses.CanBeFractured`, Mirror
   the equipment flag, non-unique targets and no currency on mirrored items); the 2026-10-30 native run covered the
-  success and refusal paths. Veiled modifiers and Reflective Oil/Sanctified remain separate,
-  and Mirror from a stash tab is still unsupported. See
+  success and refusal paths. Veiled modifiers and Reflective Oil/Sanctified remain separate. See
   [the game rules](../docs/re/fracturing-mirror-mechanics.md).
   Hinekora's Lock's server rules are in (Mods flag bit 8 + seed, C→S 0x29d / S→C 0x2a0 preview with status 0,
   exact committed result, clear-on-modification); the client's preview branch is the item popup's foresight element.

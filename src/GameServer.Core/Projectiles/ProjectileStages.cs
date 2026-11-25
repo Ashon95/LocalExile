@@ -29,14 +29,17 @@ public sealed partial class ProjectileRuntime
             void Pulse()
             {
                 if (!projectiles.ContainsKey(p.Id)) return;
-                var targets = ActorsInOrder(generations: false, out int listed);
+                var targets = ActorsInOrder(world.ActorsNear(p.Position, pulse.Radius + 2, Now), generations: false, out int listed);
                 try
                 {
                     for (int i = 0; i < listed; i++)
                     {
                         var target = targets[i];
-                        if (target.Team != p.Use.Team && target.Key != p.Use.Owner
-                            && (target.Position(Now) - p.Position).Length <= pulse.Radius + target.Radius)
+                        if (target.Team == p.Use.Team || target.Key == p.Use.Owner) continue;
+                        var delta = target.Position(Now) - p.Position;
+                        double limit = pulse.Radius + target.Radius;
+                        if (Math.Abs(delta.X) <= limit && Math.Abs(delta.Y) <= limit
+                            && delta.X * delta.X + delta.Y * delta.Y <= limit * limit)
                             Damage(p, target, pulse.Stage, isArea: true);
                     }
                 }
@@ -51,27 +54,46 @@ public sealed partial class ProjectileRuntime
             {
                 if (!projectiles.ContainsKey(p.Id)) return;
                 EmitChildren(p, emission);
-                Schedule(Now + emission.Interval, Emit);
+                if (emission.TravelGroups is not int limit || p.EmissionNumber < limit)
+                    Schedule(Now + emission.Interval, Emit);
             }
             Schedule(Now + emission.Interval, Emit);
         }
     }
 
-    void EmitChildren(ProjectileEntity parent, ProjectileEmissionRecipe recipe)
+    void EmitAfterEnd(ProjectileEntity parent, ProjectileEmissionRecipe recipe, ProjectileActorKey? excluded)
+    {
+        if (recipe.Waves is { } waves)
+        {
+            foreach (var (delay, count) in waves)
+                Schedule(Now + delay, () =>
+                {
+                    parent.ChildEmission = 0;
+                    EmitChildren(parent, recipe with { Child = recipe.Child with { Count = count } }, excluded);
+                });
+            return;
+        }
+        if (recipe.Delay > 0) Schedule(Now + recipe.Delay, () => { parent.ChildEmission = 0; EmitChildren(parent, recipe, excluded); });
+        else { parent.ChildEmission = 0; EmitChildren(parent, recipe, excluded); }
+    }
+
+    void EmitChildren(ProjectileEntity parent, ProjectileEmissionRecipe recipe, ProjectileActorKey? excluded = null)
     {
         var child = recipe.Child;
         Validate(child);
         if (parent.ChildEmission == 0) parent.ChildEmission = ++sequence;
         var baseDirection = recipe.BaseDirection?.Invoke(parent) ?? parent.Direction;
+        var payload = recipe.ChildPayload is { } childPayload ? childPayload(parent.Use.Payload) : parent.Use.Payload;
         for (int i = 0; i < child.Count; i++)
         {
             double angle = recipe.RandomDirections ? parent.Random.NextDouble() * Math.Tau
                 : recipe.Radial ? Math.Tau * i / child.Count + parent.EmissionNumber * 2.399963229728653
                 : child.Count <= 1 ? 0 : child.SpreadRadians * (i / (double)(child.Count - 1) - .5);
             var direction = recipe.RandomDirections ? parent.Direction.Rotate(angle) : baseDirection.Rotate(angle);
-            var use = parent.Use with { Profile = child, Origin = parent.Position,
+            var use = parent.Use with { Profile = child, Origin = parent.Position, Payload = payload,
                 Aim = parent.Position + direction * child.Range };
             var spawned = Spawn(use, parent.UseId, parent.ChildEmission, parent.Id, parent.Position, direction);
+            if (excluded is { } target) spawned.TurnaroundTarget = target;
             // Point Blank/Far Shot measure the whole continuation, not just the child's own segment.
             spawned.Distance = parent.Distance;
         }
@@ -81,9 +103,10 @@ public sealed partial class ProjectileRuntime
     void TargetedHits(ProjectileEntity p, ProjectileActor primary, ProjectileTargetedRecipe recipe)
     {
         long hitEvent = ++sequence;
-        foreach (var target in world.Actors(Now, Now).Where(a => a.Team != p.Use.Team && a.Key != primary.Key
-            && a.Key != p.Use.Owner && (a.Position(Now) - primary.Position(Now)).Length <= recipe.Radius)
-            .OrderBy(a => (a.Position(Now) - primary.Position(Now)).Length).ThenBy(a => a.Key.Id).Take(recipe.Count))
+        var origin = primary.Position(Now);
+        foreach (var target in world.ActorsNear(origin, recipe.Radius + 2, Now).Where(a => a.Team != p.Use.Team && a.Key != primary.Key
+            && a.Key != p.Use.Owner && (a.Position(Now) - origin).Length <= recipe.Radius)
+            .OrderBy(a => (a.Position(Now) - origin).Length).ThenBy(a => a.Key.Id).Take(recipe.Count))
             Damage(p, target, recipe.Stage, hitEvent, new());
     }
 
@@ -186,22 +209,30 @@ public sealed partial class ProjectileRuntime
     void ResolveArea(ProjectileEntity p, ProjectileAreaRecipe recipe, ProjectileVector centre,
         ProjectileActorKey? victim, long areaId)
     {
-        world.Publish(new(ProjectileEventKind.Area, p, Now, centre, Radius: recipe.Radius, Stage: recipe.Stage));
-        var targets = ActorsInOrder(generations: true, out int listed);
+        double radius = recipe.RadiusForGroundBounce?.Invoke(p.GroundBounces) ?? recipe.Radius;
+        world.Publish(new(ProjectileEventKind.Area, p, Now, centre, Radius: radius, Stage: recipe.Stage));
+        var targets = ActorsInOrder(world.ActorsNear(centre, radius + 2, Now), generations: true, out int listed);
+        double coneEdge = recipe.ConeHalfAngle > 0 ? Math.Cos(recipe.ConeHalfAngle) : -1;
         try
         {
             for (int i = 0; i < listed; i++)
             {
                 var target = targets[i];
-                if (target.Team != p.Use.Team && target.Key != p.Use.Owner
-                    && (!recipe.ExcludeContactTarget || target.Key != victim)
-                    && (target.Position(Now) - centre).Length <= recipe.Radius + target.Radius)
+                if (target.Team == p.Use.Team || target.Key == p.Use.Owner
+                    || (recipe.ExcludeContactTarget && target.Key == victim)) continue;
+                var delta = target.Position(Now) - centre;
+                double limit = radius + target.Radius;
+                if (Math.Abs(delta.X) <= limit && Math.Abs(delta.Y) <= limit
+                    && delta.X * delta.X + delta.Y * delta.Y <= limit * limit
+                    && (coneEdge <= -1 || delta.Dot(p.Direction) >= coneEdge * delta.Length))
+                {
                     if (target.Key == victim)
                         Damage(p, target, recipe.Stage, multiplier: recipe.Multiplier, admissionStage: "direct", isArea: true);
                     else Damage(p, target, recipe.Stage,
                         recipe.Scope == ProjectileHitScope.Emission ? p.EmissionId : areaId, new(), recipe.Multiplier,
                         admissionStage: recipe.Scope == ProjectileHitScope.Emission
                             ? recipe.Stage + ":" + p.GroundBounces : recipe.Stage, isArea: true);
+                }
             }
         }
         finally { Return(targets, listed); }
@@ -214,9 +245,8 @@ public sealed partial class ProjectileRuntime
     /// other list is sorted as before, keeping the listed order of equal keys. The array is rented: hand it back with
     /// <see cref="Return"/>. (An area sorted every actor of the instance for each of its explosions.)
     /// </summary>
-    ProjectileActor[] ActorsInOrder(bool generations, out int count)
+    ProjectileActor[] ActorsInOrder(IReadOnlyList<ProjectileActor> actors, bool generations, out int count)
     {
-        var actors = world.Actors(Now, Now);
         count = actors.Count;
         var copy = System.Buffers.ArrayPool<ProjectileActor>.Shared.Rent(count);
         bool ordered = true;

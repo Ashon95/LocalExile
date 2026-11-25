@@ -84,6 +84,9 @@ throws (the out-of-range builder is `0x140e272d0`, the exception type `0x143a5c5
 
 A base-data entity variable is raw u32 name hash, u8 flags (0), u8 value count (1), u8 type (1), raw u32 entity id.
 `0x141dfe5a0` resolves type 1 through the instance entity table and defers an unresolved forward reference.
+Type 9 is an i32 and type 8 an f32 (number reader `0x141806520`), in the same 11-byte shape; 10 is a bool (1 byte), 7 and
+0xb are strings, others are ignored. GEAL reads them as `this.<name>` (an object script's `this.RandomNumber` is
+`0xe70679eb`); an unset one gives GEAL "Expression passed to function gave an empty result".
 The variable-name hash is `0x1406db8f0`, Murmur2 of UTF-16LE with seed 0; `next` is `0x61f4555e`.
 This is distinct from the narrowed-byte metadata type hash.
 
@@ -144,10 +147,10 @@ Offsets are inside the component object. "If bN" means that bit of the component
 | u8 flags0, u8 flags1 | | |
 | if f0 & 0x20: f32 +0x2b0, f32 +0x2a8, f32 +0x2ac | | +0x2b0 the uniform scale (× the object type's own, type `+0x5c`; "Scale" in the info dump `0x141e36650`; setter `0x141e39050`, skipped when `+0x1e6` bit 4 "locked scale"), +0x2a8 / +0x2ac an x / y stretch on top of it: the local-to-world transform `0x141e394f0` takes x × +0x2a8 × +0x2b0, y × +0x2ac × +0x2b0, z × +0x2b0. The constructor sets 1.0. Sending s in all three draws at s² in x and y (Righteous Fire's ring, live 2026-10-23) |
 | if f1 & 0x04: f32 +0x2d8, +0x2dc, +0x2e0, +0x2e4 | | probably a rotation quaternion (copied as one block) |
-| if f0 & 0x04: i32 +0x290, f32 +0x2b4 | | **fixed height**: whole steps of 7.8125 and the world z; when `+0x290` ≠ `0x7fffffff` the z is used instead of the terrain height (`0x141e38b40`) |
+| if f0 & 0x04: i32 +0x290, f32 +0x2b4 | | **fixed height**: −z / 7.8125 in whole steps (world z points down) and the world z; when `+0x290` ≠ `0x7fffffff` the z is used instead of the terrain height (`0x141e38b40`) |
 | if f0 & 0x40: f32 +0x2b8, f32 +0x2bc | else derived from x/y | world x, y (else `(grid + 0.5) × 250/23`) |
 | if f1 & 0x01: u32, u32, u32, u8, u32, u8 | | movement (`0x141e37460`) |
-| if f1 & 0x02: u8, u8 | | visibility toggles |
+| if f1 & 0x02: u8, u8 | | `+0x1e7` bit 0, then **blocking** (`+0x1e5` bit 0x08, the bit 0x2b2 clears on a corpse); each change calls vtable +0xb0. The constructor (`0x141e31ca0`) already set blocking from the type's .ot `blocking` (type +0x16, parser `0x141e30ba0`; unset is false, `0x141e281d0`) and cleared `+0x1e7`, so the pair only overrides: a hard-coded `0, 1` made a `blocking = false` object (the Labyrinth trial's return portal, waypoints, area transitions) a body |
 | if f1 & 0x08: u8 | | `+0x1e6` bit 0x40: the object blocks no walker (the collision test `0x141e65ae0` skips it; pets) |
 | if f1 & 0x10: u32 +0x2a0 | | |
 
@@ -362,7 +365,7 @@ not the inventory manager that UI uses; that one needs 0xc0 ([05](05-inventories
 | u32 n + n × UTF-16 | | a metadata path, looked up with `0x141728230`. Empty for us |
 | u16 | +0x21c | |
 | u8 | → `0x141e9d3f0` | initial stance: 0 base, 68 WashedUp |
-| u8, u8 | +0x230, +0x234 | **only if** a runtime value (`… +0x1a8 < 1`) holds. It does **not** for our player (traced: 15 bytes in the main body) |
+| u8, u8 | +0x230, +0x234 | **only if** Life `+0x1a8 <= 0` (`0x1421995dc`): death `Animation.dat` row (`6` = Death) and clip index (`0`) |
 | u32 | +0x26c | |
 | u32 | +0x274 | |
 | then own vtable slot 20 `0x142199c20` | | 2 flag bytes (f0, f1). f0 0x40 → `0x14219e480`, else f0 0x20 → `0x14219f170`; f0 0x01 → u16 + `0x14193e340` record; f0 0x04 → u16 + record + u8; f0 0x08, f0 0x10 and f1 0x01 → further sections; f1 0x02 → a flag. All 0 for us |
@@ -404,8 +407,15 @@ drops. Found with a hardware watchpoint on the field and the dispatcher's disass
 Gateway keeps gold per account, as in the real game where every character of an account (and league) shares it:
 `AccountStash.Gold`, saved in the account's stash row of `data/characters.db` ([18](18-stash.md) §6). It sends that amount on every area
 entry, on `/gold` and after a gold respec. A character save from before this still holding `Gold` gives it to the
-account at the character's next login (`CharacterSaves.TakeGold`). Gold coins on the ground are the item
-`Metadata/Items/Currency/GoldCoin` (type hash 0xDDA0D6FB, `0x14031eda0` plays their pickup sound).
+account at the character's next login (`CharacterSaves.TakeGold`). Gold coins on the ground are the item `Metadata/Items/Currency/GoldCoin` (type hash `0xDDA0D6FB`).
+Attaching `GameObjectTasks` row 42 (`AutoPickupWorldItem`, HASH16 `0x9c67`, 0 payload bytes in the inline task list
+`0x141ee6950`) to gold `WorldItem` blobs lets S→C **0x2c3** (`UpdateTask`, before `0x2bd` removal) run
+`AutoPickupWorldItem` (`0x14176f320`), spawning `Metadata/Effects/misc/CurrencyGoldCoin/epk/coin_pickup.epk` and playing
+`SettlersLeague_GoldSpend` (`SoundEffects` row 641).
+S→C **0x278** (19 bytes, class `0x1435e6f80`, read `0x1421b5640`, dispatcher case `0xd0` at `0x14215a675` →
+`InGameUI::vtable[+0xb00]` `0x140d7a560`) shows the floating `+X Gold` popup: `u16 BE 0x0278`, `i32 BE gridX`,
+`i32 BE gridY`, `u32 BE entityId` (passing the player id anchors to the player and merges rapid pickups via `0x140cb2660`),
+`u8` 1-based `WorldPopupIconTypes` row (`0x140cb1478` decrements by 1; `4` = row 3 `GoldCoin`), `i32 BE amount`.
 Monsters drop gold piles (`ItemDrops.Gold`, our own numbers): normal 40%, magic 75%, rare and unique always, each
 (3 + 1.2 × level) × 1/2/5/15 by rarity. Gold within the `gold_auto_loot_radius` setting (default 20 cells) is
 picked up

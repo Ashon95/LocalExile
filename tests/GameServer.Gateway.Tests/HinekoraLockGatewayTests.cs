@@ -15,7 +15,7 @@ public class HinekoraLockGatewayTests
     [Fact]
     public async Task Gateway_lock_preview_commit_and_refusals()
     {
-        await WithSession(async (conn, items, stash, send, _, _) =>
+        await WithSession(async (player, items, stash, send, _, _) =>
         {
             var currency = Put(items, stash, false,
                 ItemCatalog.Create(Program.Items.Find(CurrencyEffects.HinekorasLock)!) with { StackSize = 2 }, 0);
@@ -28,14 +28,14 @@ public class HinekoraLockGatewayTests
             Assert.NotEqual(0u, after.Item.ForeseeSeed);
             Assert.Equal(1, Current(items, currency.Id).Item.StackSize);
 
-            PlayerInventories.Forget(conn.Character!);
-            var reloaded = PlayerInventories.For(conn.Character!, Program.Items);
+            PlayerInventories.Forget(player.Character.Name!);
+            var reloaded = PlayerInventories.For(player.Character.Name!, Program.Items);
             var saved = reloaded.Items(Main).Single(i => i.Id == target.Id).Item;
             Assert.True(saved.Foreseeing);
             Assert.Equal(after.Item.ForeseeSeed, saved.ForeseeSeed);
         });
 
-        await WithSession(async (conn, items, stash, send, _, _) =>
+        await WithSession(async (player, items, stash, send, _, _) =>
         {
             var currency = Put(items, stash, false,
                 ItemCatalog.Create(Program.Items.Find(CurrencyEffects.HinekorasLock)!) with { StackSize = 2 }, 0);
@@ -49,7 +49,7 @@ public class HinekoraLockGatewayTests
             Assert.Equal(1, Current(items, currency.Id).Item.StackSize);
         });
 
-        await WithSession(async (conn, items, stash, send, _, _) =>
+        await WithSession(async (player, items, stash, send, _, _) =>
         {
             var currency = Put(items, stash, false,
                 ItemCatalog.Create(Program.Items.Find(CurrencyEffects.HinekorasLock)!) with { StackSize = 2 }, 0);
@@ -69,7 +69,7 @@ public class HinekoraLockGatewayTests
             }
         });
 
-        await WithSession(async (conn, items, stash, send, sendRaw, readPreview) =>
+        await WithSession(async (player, items, stash, send, sendRaw, readPreview) =>
         {
             var target = Put(items, stash, false, LockedWand(), 4);
             var currency = Put(items, stash, false,
@@ -86,7 +86,7 @@ public class HinekoraLockGatewayTests
             Assert.Equal(2, Current(items, currency.Id).Item.StackSize);
         });
 
-        await WithSession(async (conn, items, stash, send, sendRaw, readPreview) =>
+        await WithSession(async (player, items, stash, send, sendRaw, readPreview) =>
         {
             var target = Put(items, stash, false, LockedWand(), 4);
             var currency = Put(items, stash, false,
@@ -102,13 +102,13 @@ public class HinekoraLockGatewayTests
             Assert.Equal(preview.Payload, after.Payload());
             Assert.Equal(1, Current(items, currency.Id).Item.StackSize);
 
-            PlayerInventories.Forget(conn.Character!);
-            var saved = PlayerInventories.For(conn.Character!, Program.Items).Items(Main).Single(i => i.Id == target.Id).Item;
+            PlayerInventories.Forget(player.Character.Name!);
+            var saved = PlayerInventories.For(player.Character.Name!, Program.Items).Items(Main).Single(i => i.Id == target.Id).Item;
             Assert.False(saved.Foreseeing);
             Assert.Equal(preview.Payload, saved.Payload());
         });
 
-        await WithSession(async (conn, items, stash, send, sendRaw, readPreview) =>
+        await WithSession(async (player, items, stash, send, sendRaw, readPreview) =>
         {
             var locked = new ItemRolls(Program.Items).ApplyLock(FourModWand() with { ItemLevel = 30 }, new Random(11))!;
             var target = Put(items, stash, false, locked, 4);
@@ -133,7 +133,7 @@ public class HinekoraLockGatewayTests
             Assert.Equal(1, Current(items, currency.Id).Item.StackSize);
         });
 
-        await WithSession(async (conn, items, stash, send, sendRaw, readPreview) =>
+        await WithSession(async (player, items, stash, send, sendRaw, readPreview) =>
         {
             var target = Put(items, stash, false, LockedWand(), 4);
             var currency = Put(items, stash, false,
@@ -149,6 +149,35 @@ public class HinekoraLockGatewayTests
 
             Assert.Equal(before, Current(items, target.Id).Item);
             Assert.Equal(2, Current(items, currency.Id).Item.StackSize);
+        });
+
+        // The preview and its commit with the currency and the target in a stash tab (the same tab: one 0xbf for both).
+        await WithSession(async (player, items, sessionStash, send, sendRaw, readPreview) =>
+        {
+            // The stash the server uses for this player: its key depends on the league catalog other tests may load.
+            var stash = global::Game.StashOf(player);
+            InventoryItem InTab(Item item, byte x) => stash.Place(0, x, 0, new InventoryItem(stash.NewItemId(), 0, 0, item), Shape, out _)!.Value.Placed;
+            var target = InTab(LockedWand(), 4);
+            var currency = InTab(ItemCatalog.Create(Program.Items.Find(CurrencyEffects.ChaosOrb)!) with { StackSize = 2 }, 0);
+            uint tab = stash.InventoryOf(0);
+            int publicTab = stash.Records(null, new HashSet<int>()).First(t => t.Type == 1 && !t.Hidden && t.HiddenKey == 0).Index;
+            Assert.True(stash.SetPublic(publicTab, true));
+            var pubCurrency = stash.Place(publicTab, 0, 0, new InventoryItem(stash.NewItemId(), 0, 0,
+                ItemCatalog.Create(Program.Items.Find(CurrencyEffects.ChaosOrb)!) with { StackSize = 2 }), Shape, out _)!.Value.Placed;
+            await sendRaw(new LoginWriter().U16(0x29d).U16(13).U32(stash.InventoryOf(publicTab)).U32(pubCurrency.Id).U32(tab).U32(target.Id).ToArray());
+            var pubPreview = await readPreview();
+            Assert.NotEqual((ushort)0, pubPreview.Status);
+            Assert.Equal(0ul, pubPreview.Count);
+
+            await sendRaw(new LoginWriter().U16(0x29d).U16(12).U32(tab).U32(currency.Id).U32(tab).U32(target.Id).ToArray());
+            var preview = await readPreview();
+            Assert.Equal((ushort)0, preview.Status);
+            await send(new LoginWriter().U16(0x71).U32(tab).U32(currency.Id).U32(tab).U32(target.Id).ToArray());
+
+            var after = stash.Inventory(0).Items.Single(i => i.Id == target.Id).Item;
+            Assert.False(after.Foreseeing);
+            Assert.Equal(preview.Payload, after.Payload());
+            Assert.Equal(1, stash.Inventory(0).Items.Single(i => i.Id == currency.Id).Item.StackSize);
         });
     }
 
@@ -172,13 +201,13 @@ public class HinekoraLockGatewayTests
         Explicit("LocalIncreasedPhysicalDamagePercent1"), Explicit("IncreasedManaWeapon1"),
         Explicit("LocalIncreasedAttackSpeed1"), Explicit("Intelligence1")) with { ItemLevel = 1 };
 
-    static async Task WithSession(Func<ClientState, PlayerInventories, AccountStash, Func<byte[], Task>,
+    static async Task WithSession(Func<Player, PlayerInventories, AccountStash, Func<byte[], Task>,
         Func<byte[], Task>, Func<Task<Preview>>, Task> action)
     {
         using var save = new SaveFixture();
         string name = "Hinekora" + Guid.NewGuid().ToString("N");
-        var conn = new ClientState(new(ushort.MaxValue, "HinekoraTest", 128, 128, 32, 32, null, []), 0, 1)
-        { Character = name, Account = name, League = "Standard" };
+        var player = new Player(new(ushort.MaxValue, "HinekoraTest", 128, 128, 32, 32, null, []), 0, 1)
+        { Character = { Name = name, Account = name, League = "Standard" } };
         var items = PlayerInventories.For(name, Program.Items);
         var stash = AccountStash.For(name, Program.Items);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -189,12 +218,18 @@ public class HinekoraLockGatewayTests
         using var reader = await accepting;
         var ciphers = new ConnectionCiphers(new byte[64], isClient: false);
         var clientCiphers = new ConnectionCiphers(new byte[64], isClient: true);
+        player.Connection.Session = new("hinekora-test", writer.GetStream(), ciphers);
         try
         {
-            Task Send(byte[] packet) => global::Game.OnClientMessages("hinekora-test", writer.GetStream(), ciphers,
-                [((ushort)(packet[0] << 8 | packet[1]), packet)], [], conn).WaitAsync(TimeSpan.FromSeconds(5));
-            Task SendRaw(byte[] packet) => global::Game.OnClientMessages("hinekora-test", writer.GetStream(), ciphers,
-                [], packet, conn).WaitAsync(TimeSpan.FromSeconds(5));
+            Task Send(byte[] packet) => global::Game.OnClientMessages([((ushort)(packet[0] << 8 | packet[1]), packet)], [], player).WaitAsync(TimeSpan.FromSeconds(5));
+            Task SendRaw(byte[] packet)
+            {
+                var framed = InstanceProtocol.SplitClientMessages(packet, out var partial, out var unknown);
+                Assert.Empty(partial);
+                Assert.Empty(unknown);
+                Assert.Equal(0, ClientInbox.UnframedRun(0, framed.Count, unknown.Length));
+                return global::Game.OnClientMessages(framed, unknown, player).WaitAsync(TimeSpan.FromSeconds(5));
+            }
             async Task<Preview> ReadPreview()
             {
                 var header = new byte[14];
@@ -214,7 +249,7 @@ public class HinekoraLockGatewayTests
                 clientCiphers.Receive.Process(payload);
                 return new(key, status, count, payload);
             }
-            await action(conn, items, stash, Send, SendRaw, ReadPreview);
+            await action(player, items, stash, Send, SendRaw, ReadPreview);
         }
         finally
         {

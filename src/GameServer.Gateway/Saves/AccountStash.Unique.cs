@@ -32,7 +32,7 @@ public sealed partial class AccountStash
                 return _tabs[tab].Saved.Type == StashRules.Map
                     ? MapPageTakes(_tabs[tab].Saved.UniqueCategory, item)
                     : _rules.Uniques.Find(item)?.Category == _tabs[tab].Saved.UniqueCategory;
-            return Holds(tab, item.TypeHash);
+            return (tab >= 0 && tab < _tabs.Count && TakesInMapRow(_tabs[tab], item)) || Holds(tab, item.TypeHash);
         }
     }
 
@@ -43,7 +43,7 @@ public sealed partial class AccountStash
         for (int parent = 0; parent < _tabs.Count; parent++)
         {
             var tab = _tabs[parent].Saved;
-            if (tab.Type != StashRules.Unique || tab.UniqueCategory != 0) continue;
+            if (tab.Type != StashRules.Unique || tab.UniqueCategory != 0 || tab.Hidden) continue;
             var categories = UniqueChildren(parent).Select(i => _tabs[i].Saved.UniqueCategory).ToHashSet();
             foreach (var (key, name) in _rules.Uniques.Categories)
             {

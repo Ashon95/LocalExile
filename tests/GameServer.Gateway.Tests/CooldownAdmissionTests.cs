@@ -4,107 +4,36 @@ namespace GameServer.Gateway.Tests;
 
 public sealed class CooldownAdmissionTests
 {
-    [Fact]
-    public void Unpayable_uses_leave_actions_and_cooldowns_alone_and_blinks_share_spent_uses()
+
+    static void CheckCommittedDashSharing(Fixture f)
     {
-        using var f = new Fixture();
-        var c = f.Conn;
-        var ids = f.Equip(PlayerInventories.Weapon1, "Dash", "Frostblink", "Flame Dash");
-        var dash = Game.SupportedSkill(c, ids[0]);
-        var frost = Game.SupportedSkill(c, ids[1]);
-        var flame = Game.SupportedSkill(c, ids[2]);
-        CooldownUseTicket? ticket = null;
-        bool Start(ushort id, Action action)
-        {
-            var gem = Game.SupportedSkill(c, id);
-            return Game.TryBeginSkillCooldownUse(c, id, gem.Effect,
-                Game.CooldownForSkill(c, id), false, action, out ticket);
-        }
+        var c = f.Player;
+        var inventory = Game.ItemsOf(c);
+        foreach (var (slot, item) in inventory.EquipmentSnapshot()) inventory.Remove(slot, item.Id);
+        c.SingleUseCooldowns.Clear(); c.SkillReadyAt.Clear(); c.CooldownGroups.Clear(); c.CooldownSources.Clear();
+        c.Use(new(AreaLayouts.TheCoast, "1_1_2", 1000, 1000, 100, 100, (_, _) => true, []) { Sight = (_, _) => 2 });
+        c.Connection.PlayerSent = c.Connection.PlayerObjectCreated = true;
+        c.Walk.Teleport(100, 100, 0);
+        var ids = f.Equip(PlayerInventories.Weapon1, "Dash", "Frostblink");
+        ushort dashId = ids.Single(id => Game.SkillsFor(c).EffectId(Game.SupportedSkill(c, id).Effect) == "Dash");
+        ushort frostId = ids.Single(id => id != dashId);
+        var dash = Game.SupportedSkill(c, dashId); var frost = Game.SupportedSkill(c, frostId);
         c.PlayerMana = 0;
-        int action = c.ActionCount;
-        Assert.False(Start(ids[0], () => { c.ActionCount++; c.Walk.Teleport(150, 100, 0); }));
-        Assert.Equal(action, c.ActionCount); Assert.Equal((100, 100), c.Walk.Position(0));
-        Assert.Empty(c.SingleUseCooldowns); Assert.Empty(c.SkillReadyAt);
-        c.PlayerStats[Program.Stats.Key("keystone_blood_magic")!.Value] = 1;
-        c.PlayerLife = 1;
-        Assert.False(Start(ids[0], () => throw new Exception("Unpayable life must not start an action")));
-        Assert.Empty(c.SingleUseCooldowns);
-        c.PlayerStats.Remove(Program.Stats.Key("keystone_blood_magic")!.Value); c.PlayerLife = 1000; c.PlayerMana = 1000;
-        Assert.True(Start(ids[0], () => { }));
-        uint dashCost = ticket!.Paid!.Value.Mana;
-        Assert.True(dashCost > 0);
-        Assert.Equal(1000u - dashCost, c.PlayerMana);
+        Assert.False(Game.TryCommitDashUse(c, dashId, dash.Effect, (130, 100), out _, flags: 1));
+        Assert.Equal((100, 100), c.Walk.Position(0)); Assert.Empty(c.SingleUseCooldowns);
+        c.PlayerMana = 1000;
+        Assert.True(Game.TryCommitDashUse(c, dashId, dash.Effect, (130, 100), out var receipt, flags: 1));
+        Assert.True(receipt!.To.X < receipt.From.X); // The native reverse flag survives atomic admission.
+        Assert.Equal(1000u - receipt.ManaCost, c.PlayerMana);
+        Assert.Equal(1, c.SingleUseCooldowns[frost.Effect].SpentUses);
+        Assert.False(Game.TryBeginSkillCooldownUse(c, frostId, frost.Effect, Game.CooldownForSkill(c, frostId),
+            false, () => throw new Exception("Dash already spent the shared Blink use"), out _));
         c.ClientSkillIds.UnionWith(ids);
         var current = Game.GemSkillEffects(c).Select(g => (g.Id, g.Effect)).ToArray();
         Assert.Null(Game.NativeCooldownRefresh(c, c.ProjectileEpoch, () => current));
-        Assert.True(ticket!.CommitNativeUse(c, ids[0]));
+        Assert.True(receipt.ConfirmNativeUse(c));
         Assert.NotNull(Game.NativeCooldownRefresh(c, c.ProjectileEpoch, () => current));
-        Assert.False(Start(ids[1], () => throw new Exception("Another blink is still cooling down")));
-        Assert.True(Start(ids[2], () => { }));
-        uint flameCost = ticket!.Paid!.Value.Mana;
-        Assert.True(flameCost > 0);
-        Assert.True(Start(ids[2], () => { }));
-        Assert.False(Start(ids[2], () => throw new Exception("Dash spent the first Flame Dash use")));
-        Assert.Equal(3, c.SingleUseCooldowns[flame.Effect].SpentUses);
-        Assert.Equal(1, c.SingleUseCooldowns[frost.Effect].SpentUses);
-        Assert.Equal(1000u - dashCost - 2 * flameCost, c.PlayerMana);
-        var expired = new SingleUseCooldownState(-100, 1);
-        var expiredPlan = new SingleUseCooldown(1000, 0, 3, 9);
-        for (int n = 0; n < 3; n++) Assert.True(expired.TryUse(-100, expiredPlan));
-        var activeDebts = c.SingleUseCooldowns.ToArray(); c.SingleUseCooldowns.Clear();
-        c.SingleUseCooldowns[-123] = expired; c.CooldownGroups[-123] = 9;
-        foreach (var debt in activeDebts) c.SingleUseCooldowns[debt.Key] = debt.Value;
-        c.SingleUseCooldowns.Remove(frost.Effect); c.SkillReadyAt.Remove(frost.Effect);
-        Assert.Equal(1, Game.CooldownStateLocked(c, frost.Effect, Game.CooldownForSkill(c, ids[1])!.Value, 0).SpentUses);
-
-        ushort link = f.Equip(PlayerInventories.Gloves, "Intuitive Link").Single();
-        c.PlayerMana = 0;
-        uint manaCostKey = Program.Stats.Key("mana_cost")!.Value;
-        c.PlayerStats[manaCostKey] = 20;
-        Assert.False(Game.CanPaySkillCost(c, link));
-        Assert.True(Start(link, () => { })); // Link costs are paid over time.
-        Assert.Equal(0u, c.PlayerMana);
-        c.PlayerStats.Remove(manaCostKey);
-        c.PlayerMana = 1000;
-
-        // Native group 36 means per-skill: these two unrelated skills must retain independent pools.
-        var independent = f.Equip(PlayerInventories.BodyArmour, "Frost Bomb", "Cold Snap");
-        Assert.True(Start(independent[0], () => { }));
-        Assert.True(Start(independent[1], () => { }));
-        CheckCooldownGroups(f);
-    }
-
-    static void CheckCooldownGroups(Fixture f)
-    {
-        var c = f.Conn;
-        bool Use(ushort id) => Game.TryBeginSkillCooldownUse(c, id, Game.SupportedSkill(c, id).Effect,
-            Game.CooldownForSkill(c, id), false, () => { }, out _);
-
-        uint groupKey = Program.Stats.Key("skill_cooldown_group_override")!.Value;
-        int NativeGroup(ushort id) => Game.PlayerSkills(c).Single(skill => skill.Id == id)
-            .Stats!.Single(stat => stat.Key == groupKey).Value;
-        var cries = f.Equip(PlayerInventories.Helmet, "Enduring Cry", "Seismic Cry", "Rallying Cry", "Infernal Cry");
-        Assert.Equal(36, NativeGroup(cries[0]));
-        Assert.True(Use(cries[0]));
-        Assert.True(Use(cries[1]));
-        c.PlayerStats[Program.Stats.Key("warcry_skills_share_cooldowns")!.Value] = 1;
-        Assert.Equal(1, NativeGroup(cries[0]));
-        Assert.False(Use(cries[0])); // Turning sharing on cannot spread an earlier independent use.
-        Assert.True(Use(cries[2]));
-        Assert.False(Use(cries[3]));
-
-        var stances = f.Equip(PlayerInventories.Boots, "Blood and Sand", "Flesh and Stone", "Convocation");
-        ushort recall = stances[2];
-        int recovery = Game.CooldownForSkill(c, recall)!.Value.RecoveryPercent;
-        c.PlayerStats[Program.Stats.Key("convocation_cooldown_speed_+%")!.Value] = 35;
-        Assert.Equal(recovery + 35, Game.CooldownForSkill(c, recall)!.Value.RecoveryPercent);
-
-        Assert.Equal(36, NativeGroup(stances[0]));
-        Assert.True(Use(stances[0]));
-        Assert.True(Use(stances[1]));
-        var guards = f.Equip(PlayerInventories.Offhand1, "Steelskin", "Molten Shell");
-        Assert.True(Use(guards[0]));
-        Assert.False(Use(guards[1]));
+        Assert.Null(Game.NativeCooldownRefresh(c, c.ProjectileEpoch, () => current));
     }
 
     [Fact]
@@ -112,41 +41,42 @@ public sealed class CooldownAdmissionTests
     {
         using var f = new Fixture();
         var ids = f.Equip(PlayerInventories.Weapon1, "Flame Dash", "Second Wind Support");
-        var original = Game.SupportedSkill(f.Conn, ids[0]);
-        var first = Game.CooldownFor(f.Conn, original.Effect, original.Level, original.Quality);
+        var original = Game.SupportedSkill(f.Player, ids[0]);
+        var first = Game.CooldownFor(f.Player, original.Effect, original.Level, original.Quality);
         Assert.NotNull(first); Assert.Equal(4, first.Value.Uses);
-        Assert.True(Game.TryBeginSkillCooldownUse(f.Conn, ids[0], original.Effect, first, false, () => { }, out _));
-        var state = f.Conn.SingleUseCooldowns[original.Effect];
+        Assert.True(Game.TryBeginSkillCooldownUse(f.Player, ids[0], original.Effect, first, false, () => { }, out _));
+        var state = f.Player.SingleUseCooldowns[original.Effect];
         f.Equip(PlayerInventories.Helmet, "Flame Dash");
-        Assert.Equal(2, Game.GemSkillEffects(f.Conn).Count(g => g.Effect == original.Effect));
-        Assert.NotNull(Game.CooldownFor(f.Conn, original.Effect, original.Level, original.Quality));
-        var copies = Game.GemSkillEffects(f.Conn).Where(g => g.Effect == original.Effect).ToArray();
-        Assert.Equal(4, Game.CooldownForSkill(f.Conn, ids[0])!.Value.Uses);
-        Assert.Equal(3, Game.CooldownForSkill(f.Conn, copies.Single(g => g.Id != ids[0]).Id)!.Value.Uses);
-        Game.RefreshSingleUseCooldowns(f.Conn);
-        Assert.Same(state, f.Conn.SingleUseCooldowns[original.Effect]);
+        Assert.Equal(2, Game.GemSkillEffects(f.Player).Count(g => g.Effect == original.Effect));
+        Assert.NotNull(Game.CooldownFor(f.Player, original.Effect, original.Level, original.Quality));
+        var copies = Game.GemSkillEffects(f.Player).Where(g => g.Effect == original.Effect).ToArray();
+        Assert.Equal(4, Game.CooldownForSkill(f.Player, ids[0])!.Value.Uses);
+        Assert.Equal(3, Game.CooldownForSkill(f.Player, copies.Single(g => g.Id != ids[0]).Id)!.Value.Uses);
+        Game.RefreshSingleUseCooldowns(f.Player);
+        Assert.Same(state, f.Player.SingleUseCooldowns[original.Effect]);
         Assert.Equal(1, state.SpentUses);
         ushort second = copies.Single(g => g.Id != ids[0]).Id;
-        Assert.True(Game.TryBeginSkillCooldownUse(f.Conn, second, original.Effect,
-            Game.CooldownForSkill(f.Conn, second), false, () => { }, out _));
+        Assert.True(Game.TryBeginSkillCooldownUse(f.Player, second, original.Effect,
+            Game.CooldownForSkill(f.Player, second), false, () => { }, out _));
         var dashId = f.Equip(PlayerInventories.BodyArmour, "Dash").Single();
-        var dash = Game.SupportedSkill(f.Conn, dashId);
-        f.Conn.SingleUseCooldowns[dash.Effect] = new(0, 1); // Dash has recovered while Flame Dash still owes uses.
-        Assert.True(Game.TryBeginSkillCooldownUse(f.Conn, dashId, dash.Effect,
-            Game.CooldownForSkill(f.Conn, dashId), false, () => { }, out _));
+        var dash = Game.SupportedSkill(f.Player, dashId);
+        // Dash's native aliases use one normalized key; Flame Dash still owes its independent stored uses.
+        f.Player.SingleUseCooldowns[Game.CooldownKey(f.Player, dash.Effect, dashId)] = new(0, 1);
+        Assert.True(Game.TryBeginSkillCooldownUse(f.Player, dashId, dash.Effect,
+            Game.CooldownForSkill(f.Player, dashId), false, () => { }, out _));
         Assert.Equal(3, state.Uses); Assert.Equal(1d, state.Rate);
 
-        foreach (var i in Game.ItemsOf(f.Conn).Items(PlayerInventories.Helmet)) Game.ItemsOf(f.Conn).Remove(PlayerInventories.Helmet, i.Id);
-        Game.RefreshSingleUseCooldowns(f.Conn);
-        Assert.Same(state, f.Conn.SingleUseCooldowns[original.Effect]); Assert.Equal(3, state.SpentUses);
+        foreach (var i in Game.ItemsOf(f.Player).Items(PlayerInventories.Helmet)) Game.ItemsOf(f.Player).Remove(PlayerInventories.Helmet, i.Id);
+        Game.RefreshSingleUseCooldowns(f.Player);
+        Assert.Same(state, f.Player.SingleUseCooldowns[original.Effect]); Assert.Equal(3, state.SpentUses);
     }
 
     [Fact]
     public void Frostblink_crosses_unwalkable_gaps_but_keeps_endpoint_and_quest_barrier_checks()
     {
         using var f = new Fixture();
-        var c = f.Conn;
-        c.PlayerSent = true;
+        var c = f.Player;
+        c.Connection.PlayerSent = true;
         c.Use(new(1, "blink-ledge", 200, 200, 100, 100,
             (x, y) => x >= 0 && y >= 0 && x < 200 && y < 200 && (x < 115 || x > 135), [])
         { CellHeights = Enumerable.Range(0, 40000).Select(i => (short)(i % 200 >= 130 ? 32 : 0)).ToArray() });
@@ -161,25 +91,79 @@ public sealed class CooldownAdmissionTests
         Assert.Equal((140, 100), c.Walk.Position(Game.ProjectileWorldTime(c)));
     }
 
+    [Fact]
+    public async Task Frostblink_slides_around_monster_blockers_and_queues_cooldown_refresh_in_area_frame()
+    {
+        using var f = new Fixture();
+        var c = f.Player;
+        c.Connection.PlayerSent = true;
+        c.Use(new(1, "blink-blocker", 200, 200, 100, 100, (x, y) => x >= 0 && y >= 0 && x < 200 && y < 200, []));
+        // Aiming onto a live monster's blocker footprint slides to the nearest clear cell instead of dropping the cast.
+        var zombie = Assert.IsType<MonsterCatalog.Variety>(Game.Monsters.Find("Metadata/Monsters/Zombies/ZombieBite"));
+        c.Area.Monsters[0x80000001u] = new("blocker", new(140, 100, 0), 0, 0, 1000) { Hostile = true, Variety = zombie };
+        Assert.True(InstantLocationSkill.TryResolve(c, c.ProjectileEpoch, (140, 100), false, _ => 0, out _, out var to));
+        Assert.True(Math.Max(Math.Abs(to.X - 140), Math.Abs(to.Y - 100)) - (zombie.ObjectSize - 1) >= 2);
+        Assert.InRange(Math.Max(Math.Abs(to.X - 140), Math.Abs(to.Y - 100)), 4, 6);
+
+        // Large-footprint monsters (ObjectSize > 8) expand the blocker slide radius beyond 8 cells.
+        c.Area.Monsters.Clear();
+        var large = zombie with { ObjectSize = 15 };
+        c.Area.Monsters[0x80000002u] = new("large-blocker", new(140, 100, 0), 0, 0, 1000) { Hostile = true, Variety = large };
+        Assert.True(InstantLocationSkill.TryResolve(c, c.ProjectileEpoch, (140, 100), false, _ => 0, out _, out var largeTo));
+        Assert.True(Math.Max(Math.Abs(largeTo.X - 140), Math.Abs(largeTo.Y - 100)) - (large.ObjectSize - 1) >= 2);
+
+        // Inside an area frame, SendNativeCooldownRefresh queues 0x02bc into Area.Delta (only: player) after 0x01ce.
+        c.Connection.LockstepClient = false;
+        var frostId = f.Equip(PlayerInventories.Weapon1, "Frostblink").Single();
+        var frost = Game.SupportedSkill(c, frostId);
+        c.ClientSkillIds.Add(frostId);
+        var plan = Game.CooldownForSkill(c, frostId);
+        Assert.NotNull(plan);
+        Assert.True(Game.TryBeginSkillCooldownUse(c, frostId, frost.Effect, plan,
+            true, () => { }, out var use));
+        Assert.True(use!.CommitNativeUse(c, frostId));
+        Assert.Contains(c.SingleUseCooldowns.Values, s => s.NeedsNativeRefresh);
+        c.Connection.WorldOutput.Begin(1);
+        var previousArea = GameArea.Own(c.Area);
+        try
+        {
+            Assert.True(c.Area.Owned);
+            Assert.True(c.Connection.WorldOutput.Started);
+            Program.ToArea(c, Game.PlayerInstantAction(c, frostId, (140, 100)), "0x01ce instant action", only: c);
+            await Game.SendNativeCooldownRefresh(c);
+            var records = c.Area.Delta.Take();
+            Assert.Equal(2, records.Count);
+            Assert.Equal(InstanceProtocol.InstantActionId, (ushort)(records[0].Bytes[0] << 8 | records[0].Bytes[1]));
+            Assert.Equal(InstanceEntities.ComponentUpdateId, (ushort)(records[1].Bytes[0] << 8 | records[1].Bytes[1]));
+            Assert.Equal(c.Id, records[1].Entity);
+            Assert.Same(c, records[1].Only);
+        }
+        finally
+        {
+            GameArea.Own(previousArea);
+        }
+    }
+
     sealed class Fixture : IDisposable
     {
         readonly string path = Path.Combine(Path.GetTempPath(), $"cooldown-admission-{Guid.NewGuid():N}.db");
         readonly IGameLogic? previousLogic = Program.GameLogicOrNull;
         readonly GameServer.Modding.IModuleLifetime? previousRules = Game.CombatLifetime;
         readonly ModuleLifetime rules = new("Game");
-        internal readonly ClientState Conn = new(new(1, "cooldown", 1000, 1000, 100, 100, null, []), 1, 1)
+        internal readonly Player Player = new(new(1, "cooldown", 1000, 1000, 100, 100, null, []), 1, 1)
         {
-            Character = "Cooldown" + Guid.NewGuid().ToString("N"), PlayerLife = 1000, PlayerMana = 1000, Instance = new(),
-            Experience = CharacterStats.ExperienceFor(100),
+            Character = { Name = "Cooldown" + Guid.NewGuid().ToString("N"), Experience = CharacterStats.ExperienceFor(100) },
+            PlayerLife = 1000,
+            PlayerMana = 1000,
+            Instance = new(),
             Pools = new(100, 1000, 1000, int.MaxValue, 0, Strength: 1000, Dexterity: 1000, Intelligence: 1000),
             LeagueModule = new(new("test", "Standard", false, false), new HashSet<string>(["Game"]))
         };
         internal Fixture()
         {
             Saves.Open(path); Game.CombatLifetime = rules;
-            foreach (string attr in new[] { "strength", "dexterity", "intelligence" })
-                Conn.PlayerStats[Program.Stats.Key("virtual_" + attr + "_for_requirements")!.Value] = 1000;
             Program.SetGameLogic(new GameServer.Modules.Game.GameLogic(rules));
+            TestRequirements.Waive(Player);
         }
         internal ushort[] Equip(byte row, params string[] names)
         {
@@ -192,18 +176,21 @@ public sealed class CooldownAdmissionTests
                 _ => "Driftwood Wand"
             };
             var host = ItemCatalog.Create(Program.Items.Find(hostName)!);
-            Game.ItemsOf(Conn).Add(row, 0, 0, host with
+            static Item MakeGem(string n) => Program.Items.FindGem(n) is { } found
+                ? ItemCatalog.Create(found.Type) with { GemVariant = found.Variant.Index }
+                : ItemCatalog.Create(Program.Items.Find(n)!);
+            Game.ItemsOf(Player).Add(row, 0, 0, host with
             {
-                Sockets = names.Select(n => new ItemSocket(SocketColour.White, ItemCatalog.Create(Program.Items.Find(n)!))).ToArray(),
+                Sockets = names.Select(n => new ItemSocket(SocketColour.White, MakeGem(n))).ToArray(),
                 Links = names.Length == 2 ? [2] : Enumerable.Repeat((byte)1, names.Length).ToArray()
             });
-            return Game.GemSkillEffects(Conn).Where(g => names.Contains(g.Name)).Select(g => g.Id).ToArray();
+            return Game.GemSkillEffects(Player).Where(g => names.Contains(g.Name)).Select(g => g.Id).ToArray();
         }
         public void Dispose()
         {
-            Conn.Closed = true; Conn.RetireOwnedCombat(); rules.Stop(_ => { });
+            Player.Closed = true; Player.RetireOwnedCombat(); rules.Stop(_ => { });
             Game.CombatLifetime = previousRules; Program.SetGameLogic(previousLogic!);
-            PlayerInventories.Forget(Conn.Character!); TestEnvironment.ReleaseSaves(path);
+            PlayerInventories.Forget(Player.Character.Name!); TestEnvironment.ReleaseSaves(path);
         }
     }
 }

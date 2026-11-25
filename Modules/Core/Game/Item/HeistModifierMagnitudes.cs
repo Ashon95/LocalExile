@@ -9,14 +9,20 @@ static class HeistModifierMagnitudes
         Dictionary<string, long>? effects = null;
         var catalyst = CatalystQuality.For(item);
         long enchantEffect = 0;
+        long implicitEffect = 0;
         bool hasEffectStat = false;
         foreach (var mod in item.Mods)
             if (mods.ByHash(mod.Hash) is { } row)
                 for (int index = 0; index < row.Stats.Count && index < mod.Values.Count; index++)
                 {
-                    if (row.Stats[index].Id == "local_enchant_stat_magnitude_+%")
+                    if (row.Stats[index].Id == Stat.LocalEnchantStatMagnitudePlusPct)
                     { enchantEffect += mod.Values[index]; hasEffectStat = true; continue; }
-                    if (Tag(row.Stats[index].Id) is not { } tag) continue;
+                    // "X% increased Implicit Modifier magnitudes" raises the values of the same item's implicit-section
+                    // mods, the same way the enchant stat beside it in Stats.dat raises enchant mods below. Read raw
+                    // here, like the enchant stat: the value itself is never scaled.
+                    if (row.Stats[index].Id == Stat.LocalImplicitStatMagnitudePlusPct)
+                    { implicitEffect += mod.Values[index]; hasEffectStat = true; continue; }
+                    if (Tag(row.Stats[index].Name) is not { } tag) continue;
                     hasEffectStat = true;
                     if (mod.Section != ModSection.Enchant) continue;
                     effects ??= new(StringComparer.Ordinal);
@@ -28,7 +34,8 @@ static class HeistModifierMagnitudes
         {
             var stat = row.Stats[index];
             int value = mod.Values[index];
-            if (Tag(stat.Id) is not null || stat.Id == "local_enchant_stat_magnitude_+%") return value;
+            if (Tag(stat.Name) is not null || stat.Id == Stat.LocalEnchantStatMagnitudePlusPct
+                || stat.Id == Stat.LocalImplicitStatMagnitudePlusPct) return value;
             if (row.Unscalable
                 || row.GrantedEffects != 0 || !stat.Scalable) return null;
 
@@ -38,6 +45,7 @@ static class HeistModifierMagnitudes
                     if (row.Tags.Contains(tag)) effect += percent;
             if (catalyst?.Matches(mod, row) == true) effect += item.Quality;
             if (mod.Section == ModSection.Enchant) effect += enchantEffect;
+            if (mod.Section == ModSection.Implicit) effect += implicitEffect;
             if (effect == 0) return null;
 
             decimal scaled = (decimal)value * (100 + ordinaryEffect + effect) / 100;

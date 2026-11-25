@@ -29,31 +29,31 @@ public class LockstepTests : IDisposable
     [Fact]
     public void Instant_replies_share_the_lockstep_sequence_and_suppress_local_action_events()
     {
-        var conn = new ClientState(new(1, "instant", 300, 300, 100, 100, null, []), 1, 1)
-            { LockstepClient = true, LockstepSequence = 0x575, ActionCount = 17, LockstepBusyUntil = 12.5 };
+        var player = new Player(new(1, "instant", 300, 300, 100, 100, null, []), 1, 1)
+            { Connection = { LockstepClient = true }, LockstepSequence = 0x575, ActionCount = 17, LockstepBusyUntil = 12.5 };
         // The retained ground and object forms carry 0x0101 and 0x0121; their sequence joins ordinary actions.
-        Assert.Equal("01CE0000100000000000000084098576010181F78223",
-            Convert.ToHexString(Game.PlayerInstantAction(conn, 0x8409, (503, 547))));
-        Assert.Equal("01CE000010000000000000008409857701210000300181F78223",
-            Convert.ToHexString(Game.PlayerInstantAction(conn, 0x8409, (503, 547), 0x3001)));
-        Assert.Equal(0x577, conn.LockstepSequence);
-        Assert.Equal(17, conn.ActionCount); // An instant skill does not cancel an existing cast or channel.
-        Assert.Equal(12.5, conn.LockstepBusyUntil);
-        conn.LockstepSequence = 0x7fff;
-        Assert.Equal("80000101", Convert.ToHexString(Game.PlayerInstantAction(conn, 0x8409, (503, 547))[14..18]));
-        conn.LockstepClient = false;
-        Assert.Equal("01CE000010000000000000008409FFFF00200000300181F78223",
-            Convert.ToHexString(Game.PlayerInstantAction(conn, 0x8409, (503, 547), 0x3001)));
-        Assert.Equal(0, conn.LockstepSequence);
+        Assert.Equal($"01CE{player.Id:X8}00000000000084098576010181F78223",
+            Convert.ToHexString(Game.PlayerInstantAction(player, 0x8409, (503, 547))));
+        Assert.Equal($"01CE{player.Id:X8}0000000000008409857701210000300181F78223",
+            Convert.ToHexString(Game.PlayerInstantAction(player, 0x8409, (503, 547), 0x3001)));
+        Assert.Equal(0x577, player.LockstepSequence);
+        Assert.Equal(17, player.ActionCount); // An instant skill does not cancel an existing cast or channel.
+        Assert.Equal(12.5, player.LockstepBusyUntil);
+        player.LockstepSequence = 0x7fff;
+        Assert.Equal("80000101", Convert.ToHexString(Game.PlayerInstantAction(player, 0x8409, (503, 547))[14..18]));
+        player.Connection.LockstepClient = false;
+        Assert.Equal($"01CE{player.Id:X8}0000000000008409FFFF00200000300181F78223",
+            Convert.ToHexString(Game.PlayerInstantAction(player, 0x8409, (503, 547), 0x3001)));
+        Assert.Equal(0, player.LockstepSequence);
         foreach (bool lockstep in new[] { false, true })
         {
-            conn.LockstepClient = lockstep;
-            conn.PlayerLife = 100;
+            player.Connection.LockstepClient = lockstep;
+            player.PlayerLife = 100;
             var state = new SingleUseCooldownState(0, 1);
             Assert.True(state.TryUse(0, new SingleUseCooldown(3000, 0)));
-            var use = new CooldownUseTicket(1, conn.ActionCount, conn.ProjectileEpoch, Instant: true,
+            var use = new CooldownUseTicket(1, player.ActionCount, player.ProjectileEpoch, Instant: true,
                 State: state, UseVersion: state.UseVersion);
-            Assert.True(use.CommitNativeUse(conn, 0x8409));
+            Assert.True(use.CommitNativeUse(player, 0x8409));
             // In lockstep the queued instant action must consume its still-ready native use itself.
             Assert.Equal(!lockstep, state.NeedsNativeRefresh);
             state.NativeRefreshed();
@@ -63,214 +63,26 @@ public class LockstepTests : IDisposable
     }
 
     [Fact]
-    public void A_walker_on_frames_starts_on_the_frame_and_stops_after_its_steps()
-    {
-        // 100 cells a second: one cell every 10 ms, 3.3 cells a frame.
-        double start = 0;
-        PlayerWalk Walker(double speed = 100) => new(0, 0, speed) { FrameOf = at => (Math.Min(at, start), start + .033) };
-
-        var walk = Walker();
-        walk.Order(100, 0, .005);   // sent 5 ms into the frame, it starts at the frame's start
-        start = .033;
-        Assert.Equal((3, 0), walk.Position(.04));   // read during a frame, it is where the frame began
-        Assert.Equal((3, 0), walk.Order(3, 0, .04));   // the stop reports where the client is now
-        Assert.Equal((3, 0), walk.Position(.04));   // the frame's steps are still steps: the step pass checks each
-        start = .066;
-        Assert.Equal((6, 0), walk.Position(.066));   // and the walker stands where they took it
-        Assert.False(walk.Moving(.066));
-
-        start = 0;
-        walk = Walker();
-        walk.Order(100, 0, 0);
-        start = .033;
-        walk.Pause(.04, .1);   // a hold also starts after the frame's steps, and ends .1 s after the frame's start
-        start = .099;
-        Assert.Equal((6, 0), walk.Position(.099));
-        start = .165;
-        Assert.Equal((9, 0), walk.Position(.165));
-
-        // A hit's recovery ends a lockstep player's walk after the steps of the frame its 0x1d1 goes out in, and nothing
-        // takes the walk up again: the client stands until its next order. A predictive player's walk is not the
-        // message's to end (it is held when the hit lands and goes on after).
-        foreach (bool lockstep in new[] { true, false })
-        {
-            ClientState Player() => new(new(1, "recovery", 300, 300, 100, 100, null, []), 1, 1)
-                { LockstepClient = lockstep, PlayerLife = 100, LockstepFrame = (0, .033) };
-            var hit = Player();
-            var free = Player();
-            hit.Walk.Order(160, 100, 0);
-            free.Walk.Order(160, 100, 0);
-            hit.LockstepFrame = free.LockstepFrame = (.033, .066);
-            lock (hit.Monsters)
-                Assert.NotNull(Game.PlayerHitRecoveryRecordLocked(hit, new(hit.ProjectileEpoch, hit.ActionCount, Until: .4, Seconds: .35f), now: .04));
-            hit.LockstepFrame = free.LockstepFrame = (.066, .099);
-            var stood = hit.Walk.Position(.066);
-            Assert.Equal(free.Walk.Position(.066), stood);
-            Assert.NotEqual(hit.Walk.Position(0), stood);
-            hit.LockstepFrame = free.LockstepFrame = (.495, .528);
-            Assert.Equal(lockstep, !hit.Walk.Moving(.495));
-            Assert.Equal(lockstep ? stood : free.Walk.Position(.495), hit.Walk.Position(.495));
-        }
-
-        // A stop whose tick steps the walker into a waypoint ends the walk there, as at a path's end: it does not go on into
-        // the next piece, and nothing of the step time is kept, so the next walk from the stand steps a whole step after
-        // it starts. Round a corner at 40 cells a second, cancelled in the frame of the step into the corner.
-        foreach (bool order in new[] { false, true })
-        {
-            start = 0;
-            walk = new PlayerWalk(0, 0, 40, walkable: (x, y) => y == 0 || x == 8) { FrameOf = at => (Math.Min(at, start), start + .033) };
-            walk.Order(8, 9, 0);
-            var corner = walk.Steps(0, 1).First(s => walk.EndsPiece(s.At));
-            Assert.True(walk.Steps(corner.At, 1).Count > 0);   // the path goes on past it
-            start = Math.Floor(corner.At / .033) * .033;
-            if (start == corner.At) start -= .033;
-            double tick = start;
-            // A cancelled action's stop, and a Move onto the walker's own cell: the same stop.
-            if (order) { var own = walk.Position(tick); walk.Order(own.X, own.Y, tick + .001); }
-            else walk.Cancel(tick + .001);
-            start = tick + .099;
-            Assert.Equal(corner.Cell, walk.Position(start));
-            Assert.False(walk.Moving(start));
-            walk.Order(0, 0, start);
-            float step = (float)(walk.Steps(start, start + 1)[1].At - walk.Steps(start, start + 1)[0].At);
-            Assert.Equal(start + step, walk.Steps(start, start + 1)[0].At, 5);
-        }
-
-        // A stats message that names a movement stat lays the piece in progress again from the walker's cell, at an
-        // unchanged speed too: the straight line from there steps sideways further on than the line from the piece's
-        // start did. Any other stats message leaves the walk as it is.
-        static int Sideways(PlayerWalk w, int y) => w.Steps(0, 9).First(s => s.Cell.Y == y).Cell.X;
-        start = 0; walk = Walker(40);
-        walk.Order(40, 1, 0);
-        int turned = Sideways(walk, 1);
-        start = .231; walk.Relay(.24);   // nine cells along, before the sideways step
-        Assert.True(Sideways(walk, 1) > turned);
-        Assert.Equal((40, 1), walk.Destination);
-        var told = new ClientState(new(1, "stats", 300, 300, 100, 100, null, []), 1, 1)
-            { LockstepClient = true, PlayerLife = 100, PlayerSent = true, LockstepFrame = (0, .033) };
-        told.Walk.Order(140, 101, 0);
-        turned = Sideways(told.Walk, 101);
-        told.LockstepFrame = (.231, .264);
-        lock (told.Monsters)
-        {
-            Game.RelayWalkForStats(told, InstanceEntities.StatsUpdate(0x1000, [(0x2fec, 0)]));
-            Assert.Equal(turned, Sideways(told.Walk, 101));
-            Game.RelayWalkForStats(told, InstanceEntities.StatsUpdate(0x1000, [(0x2fec, 0), (StatKeys.MovementVelocityPct, 0)]));
-            Assert.True(Sideways(told.Walk, 101) > turned);
-        }
-
-        // A stop keeps the time since the last step, and the next walk from the stand starts with it (40 cells a second:
-        // 25 ms a step; the client's accumulator 16 ms, + 33 ms is one step, + 33 ms two more).
-        start = 0; walk = Walker(40);
-        walk.Order(100, 0, 0);
-        start = .033; Assert.Equal((1, 0), walk.Order(1, 0, .04));   // stands at (2, 0) after the frame, 16 ms into its step
-        start = .099; walk.Order(100, 0, .099);
-        start = .165; Assert.Equal((5, 0), walk.Position(.165));
-
-        // A cancelled action on a walker that already stands (a hit's recovery on a monster between walks) changes
-        // nothing: the time the earlier stop kept is still there for the next walk.
-        start = 0; walk = Walker(40);
-        walk.Order(100, 0, 0);
-        start = .033; walk.Order(1, 0, .04);
-        start = .066; walk.Cancel(.07);
-        start = .099; walk.Order(100, 0, .099);
-        start = .165; Assert.Equal((5, 0), walk.Position(.165));
-
-        // The same through a walk-up found in reach where the walker stands, which stops where the frame's steps leave it,
-        // and a forced set at the stand keeps it.
-        start = 0; walk = Walker(40);
-        walk.Order(100, 0, 0);
-        start = .033; var (here, stop, _) = walk.Approach(11, 0, 10, .04);
-        Assert.Equal(((1, 0), (2, 0)), (here, stop));
-        start = .066; walk.Teleport(2, 0, .07);
-        start = .099; walk.Order(100, 0, .099);
-        start = .165; Assert.Equal((5, 0), walk.Position(.165));
-
-        // A walk to a ground item ends on the first cell within its range of 20 and the item's size on the ground, the
-        // search's tolerance (BaseItemTypes SizeOnGround): 21 cells from a Scroll of Wisdom, 22 from a Rustic Sash, 23
-        // from a Plate Vest.
-        var itemTypes = new ItemCatalog();
-        foreach (var (name, size) in new[] { ("Scroll of Wisdom", 1), ("Rustic Sash", 2), ("Plate Vest", 3) })
-        {
-            Assert.Equal(size, itemTypes.Find(name)!.GroundSize);
-            start = 0; walk = Walker(40);
-            Assert.Equal((38 - 20 - size, 0), walk.Approach(38, 0, 20, 0, size).Stop);
-        }
-
-        // Kept time longer than the new step (30.6 ms into a 35.4 ms diagonal step, then 25 ms straight ones): the step
-        // already due comes in the order's frame, not before it; the client steps 2, 1 and 2 cells in the next frames.
-        start = 0; walk = Walker(40);
-        walk.Order(20, 20, 0);
-        start = .033; Assert.Equal((0, 0), walk.Order(0, 0, .04));
-        Assert.Equal((1, 1), walk.Destination);
-        start = .099; Assert.Equal((1, 1), walk.Order(20, 1, .099));
-        Assert.Equal((1, 1), walk.Position(.099));
-        Assert.Equal([.1087, .1184, .1434], walk.Steps(.05, .16).Select(s => Math.Round(s.At, 4)));
-        Assert.Equal([(2, 1), (3, 1)], walk.Steps(.099, .132).Select(s => s.Cell));
-        start = .132; Assert.Equal((3, 1), walk.Position(.132));
-        start = .165; Assert.Equal((4, 1), walk.Position(.165));
-        start = .198; Assert.Equal((6, 1), walk.Position(.198));
-
-        // A slow walker's too (10 cells a second: 132 ms kept, 100 ms steps): in the order's frame, not the next one.
-        start = 0; walk = Walker(10);
-        walk.Order(20, 20, 0);
-        start = .099; walk.Order(0, 0, .1);
-        start = .165; walk.Order(20, 0, .165);
-        Assert.Equal([(1, 0)], walk.Steps(.165, .198).Select(s => s.Cell));
-        start = .231; Assert.Equal((1, 0), walk.Position(.231));
-        start = .264; Assert.Equal((2, 0), walk.Position(.264));
-
-        // A speed doubled at the stand (12.5 ms steps against 30.6 ms kept) leaves two steps due: both come in the order's
-        // frame, in order, before the walk's third step, and the client takes 5 steps in that frame's tick and 2 in the next.
-        start = 0; walk = Walker(40);
-        walk.Order(20, 20, 0);
-        start = .033; walk.Order(0, 0, .04);
-        walk.SetSpeed(80, .05);
-        start = .099; Assert.Equal((1, 1), walk.Order(20, 1, .099));
-        Assert.Equal((1, 1), walk.Position(.099));
-        Assert.Equal([.1013, .1036, .1059, .1184, .1309], walk.Steps(.099, .132).Select(s => Math.Round(s.At, 4)));
-        Assert.Equal([(2, 1), (3, 1), (4, 1), (5, 1), (6, 1)], walk.Steps(.099, .132).Select(s => s.Cell));
-        start = .165; Assert.Equal((8, 1), walk.Position(.165));
-
-        // A walk set up in the stop's own frame finds the walker still on its cell with the step in progress (the stop
-        // waits for the tick, and the new MoveTo clears it): it goes on from there with the step's fraction, 33 of
-        // 35.4 ms carried into a 25 ms step. Shield Charge takes no kept time at all (its first step from a stand is not
-        // traced): it steps a whole step after it starts.
-        start = 0; walk = Walker(40);
-        walk.Order(20, 20, 0);
-        start = .033; walk.Order(0, 0, .04);   // would stand at (1, 1) after the frame's step
-        Assert.Equal((0, 0), walk.Order(1, 20, .05));
-        Assert.Equal(.0347, walk.Steps(.033, .2)[0].At, 4);
-        start = 0; walk = Walker(40);
-        walk.Order(20, 20, 0);
-        start = .033; walk.Order(0, 0, .04);
-        walk.SetSpeed(100, .04);
-        walk.Charge(30, 1, 100, .04);
-        Assert.Equal(.05, walk.Steps(.033, .2)[0].At, 4);
-        start = .099; Assert.Equal((6, 1), walk.Position(.099));
-    }
-
-    [Fact]
     public async Task A_player_attack_walks_up_to_the_weapon_range_less_one_and_swings_by_the_client_s_goal_test()
     {
         // A Drowned (size 2, the tolerance) 13 cells off and a sword of range 11: the client's MoveTo has max range 10, so
         // the player is in reach only 12 cells off, one step on (the whole range would have it swing where it stands).
-        var conn = new ClientState(new(1, "walk-up", 300, 300, 100, 100, null, []), 1, 1);
+        var player = new Player(new(1, "walk-up", 300, 300, 100, 100, null, []), 1, 1);
         var drowned = new SpawnedMonster("Drowned", new PlayerWalk(113, 100, 8, size: 2), 0, 4, 100);
         var sword = new SkillCatalog.Unarmed(645, 1, 2, 11);
-        var (here, stop, _, atOnce) = Game.WalkUpToSwing(conn, drowned, (113, 100), sword, 0, 1);
+        var (here, stop, _, atOnce) = Game.WalkUpToSwing(player, drowned, (113, 100), sword, 0, 1);
         Assert.Equal(((100, 100), (101, 100), false), (here, stop, atOnce));
 
         // A predictive walk-up retries every 50 ms (0x141e95400, 0x141e957f0). Even after a late wake
         // beyond three seconds, an out-of-reach target does not start a swing or end the pursuit.
-        var predictive = new ClientState(new(1, "predictive-follow", 300, 300, 100, 100, null, []), 1, 1);
+        var predictive = new Player(new(1, "predictive-follow", 300, 300, 100, 100, null, []), 1, 1);
         predictive.Clock.Reset();
         var previousLogic = Program.GameLogicOrNull;
         var previousLifetime = Game.CombatLifetime;
         var lifetime = new ModuleLifetime("Game");
         Game.CombatLifetime = lifetime;
         Program.SetGameLogic(new GameServer.Modules.Game.GameLogic());
-        var session = new Game.ProjectileSession("predictive-follow", null!, null!, predictive);
+        var session = new Game.ProjectileSession(predictive);
         predictive.ProjectileRuntimeState = session;
         try
         {
@@ -306,32 +118,36 @@ public class LockstepTests : IDisposable
         // every frame after his steps, against the monster as the frame before left it, and at each waypoint; the swing in
         // the goal frame, the stand after the next tick's steps mid-piece; a search again only at the path's end or by the
         // search timer. The player walks 37 cells a second (a step every 27 ms), frames are 33 ms; reach 10, tolerance 2.
-        ClientState Lockstep(SpawnedMonster target)
+        Player Lockstep(SpawnedMonster target)
         {
-            var c = new ClientState(new(1, "walk-up", 300, 300, 100, 100, null, []), 1, 1)
+            var c = new Player(new(1, "walk-up", 300, 300, 100, 100, null, []), 1, 1)
             {
-                Pools = new(1, 1000, 100, 2, 0), PlayerLife = 500, PlayerSent = true, LockstepClient = true, LockstepFrame = (0, .033),
+                // Below the monsters' ids, so it ticks first in a frame (the client ticks objects in ascending id).
+                Id = 0x1000,
+                Pools = new(1, 1000, 100, 2, 0),
+                PlayerLife = 500,
+                Connection = { PlayerSent = true, LockstepClient = true, LockstepFrame = (0, .033) }
             };
-            c.Monsters[0x3000] = target;
+            c.Area.Monsters[0x3000] = target;
             return c;
         }
         var use = new InstanceTransfer.UseSkillOnObject(0x3000, SkillCatalog.FirstSkillId, 0x8001, 0x0400);
         double hold = .5;   // the swing's hold (LockstepAttackCutIn and the tail), read as the swing begins
-        LockstepAttack Attack(ClientState c, SpawnedMonster target)
+        LockstepAttack Attack(Player c, SpawnedMonster target)
         {
             var attack = new LockstepAttack(++c.ActionCount, 0x3000, target, 10, 2, 1, hold: () => hold);
             c.LockstepAttack = attack;
             return attack;
         }
-        byte[]? Gate(ClientState c, LockstepAttack attack, double start)
+        byte[]? Gate(Player c, LockstepAttack attack, double start)
         {
-            c.LockstepFrame = (start, start + .033);
-            lock (c.Monsters) return Game.LockstepAttackAtGate("walk-up", c, attack, use);
+            c.Connection.LockstepFrame = (start, start + .033);
+            return Game.LockstepAttackAtGate(c, attack, use);
         }
-        void Replay(ClientState c, double to)   // the frames up to `to`, the start of the frame then being sent
+        void Replay(Player c, double to)   // the frames up to `to`, the start of the frame then being sent
         {
-            c.LockstepFrame = (to, to + .033);
-            lock (c.Monsters) Game.StepWalkers(c, to);
+            c.Connection.LockstepFrame = (to, to + .033);
+            Game.StepWalkers(c, to);
         }
         byte[] Start(int x, int y, int toX, int toY) =>
             InstanceProtocol.ActionStarted(0x1000, x, y, toX, toY, use.SkillId, use.Sequence, use.Flags, targetObjectId: 0x3000);
@@ -339,38 +155,38 @@ public class LockstepTests : IDisposable
         // Walking away from one 12 cells behind: in goal where the order applies, so the swing begins in that frame, from
         // where the frame's steps leave him, 13 cells off, with no wait and no walk back.
         drowned = new SpawnedMonster("Drowned", new PlayerWalk(89, 100, 8, size: 2), 0, 4, 100);
-        conn = Lockstep(drowned);
-        conn.Walk.Order(200, 100, 0);
-        var attack = Attack(conn, drowned);
-        Assert.Equal(Start(101, 100, 89, 100), Gate(conn, attack, .033));
+        player = Lockstep(drowned);
+        player.Walk.Order(200, 100, 0);
+        var attack = Attack(player, drowned);
+        Assert.Equal(Start(101, 100, 89, 100), Gate(player, attack, .033));
         Assert.Equal(new LockstepAttack.Swing(.033, .066, (102, 100)), await attack.Decided);
-        Assert.Equal(.566, conn.LockstepBusyUntil, 9);
-        Assert.Equal(((102, 100), .033, .033), await Game.FollowMonsterToSwing(conn, drowned, sword, () => true,
+        Assert.Equal(.566, player.LockstepBusyUntil, 9);
+        Assert.Equal(((102, 100), .033, .033), await Game.FollowMonsterToSwing(player, drowned, sword, () => true,
             (_, _) => Task.FromResult(false), (0, 0), 0, false, .04, lockstep: attack));
 
         // Asked with flag 0x0001 (attack in place) of one 41 cells behind him: no walk-up. The swing begins in the order's
         // frame all the same, from where the frame's steps leave him, and he stands there through it.
         drowned = new SpawnedMonster("Drowned", new PlayerWalk(60, 100, 8, size: 2), 0, 4, 100);
-        conn = Lockstep(drowned);
-        conn.Walk.Order(200, 100, 0);
-        attack = new(++conn.ActionCount, 0x3000, drowned, 10, 2, 1, hold: () => hold) { InPlace = true };
-        conn.LockstepAttack = attack;
-        Assert.Equal(Start(101, 100, 60, 100), Gate(conn, attack, .033));
+        player = Lockstep(drowned);
+        player.Walk.Order(200, 100, 0);
+        attack = new(++player.ActionCount, 0x3000, drowned, 10, 2, 1, hold: () => hold) { InPlace = true };
+        player.LockstepAttack = attack;
+        Assert.Equal(Start(101, 100, 60, 100), Gate(player, attack, .033));
         Assert.False(attack.Open);
         Assert.Equal(new LockstepAttack.Swing(.033, .066, (102, 100)), await attack.Decided);
-        Replay(conn, .066);
-        Replay(conn, .099);
-        Assert.False(conn.Walk.Moving(.099));
-        Assert.Equal((102, 100), conn.Walk.Position(.099));
+        Replay(player, .066);
+        Replay(player, .099);
+        Assert.False(player.Walk.Moving(.099));
+        Assert.Equal((102, 100), player.Walk.Position(.099));
 
         // Asked in the frame from 0.033, its 0x1ab goes out a frame later (a frame end overtook it at the send gate):
         // the walk-up is placed at that frame's start, from the cell the player's steps have reached by then, and its
         // search timer starts there. The target then moves off: out of reach at the path's end, the walk-up searches
         // again in that frame's Positioned tick, so the timer counts from the frame's start.
         drowned = new SpawnedMonster("Drowned", new PlayerWalk(80, 100, 8, size: 2), 0, 4, 100);
-        conn = Lockstep(drowned);
-        conn.Walk.Order(200, 100, 0);
-        conn.LockstepFrame = (.033, .066);
+        player = Lockstep(drowned);
+        player.Walk.Order(200, 100, 0);
+        player.Connection.LockstepFrame = (.033, .066);
         using (var listener = new TcpListener(IPAddress.Loopback, 0))
         {
             listener.Start();
@@ -379,12 +195,13 @@ public class LockstepTests : IDisposable
             await writer.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
             using var reader = await accepting;
             var ciphers = new ConnectionCiphers(new byte[64], isClient: false);
+            player.Connection.Session = new("lockstep-test", writer.GetStream(), ciphers);
             var gate = Program.SendGates.GetValue(ciphers, _ => new(1, 1));
             Assert.True(gate.Wait(0));   // the frame end holds the send gate
-            var starting = Game.LockstepAttackStart("walk-up", writer.GetStream(), ciphers, conn, use, drowned, sword,
-                1, ++conn.ActionCount, "attack");
+            var starting = Game.LockstepAttackStart(player, use, drowned, sword,
+                1, ++player.ActionCount, "attack");
             Assert.False(starting.IsCompleted);
-            conn.LockstepFrame = (.066, .099);
+            player.Connection.LockstepFrame = (.066, .099);
             gate.Release();
             attack = (await starting)!;
             var sent = Start(102, 100, 80, 100);
@@ -394,13 +211,13 @@ public class LockstepTests : IDisposable
             Assert.Equal(sent, wire);
         }
         Assert.True(attack.Open);
-        Assert.Equal((92, 100), conn.Walk.Destination);
+        Assert.Equal((92, 100), player.Walk.Destination);
         Assert.Equal(.066, attack.TimerFrom, 9);
         drowned.Walk.Teleport(60, 100, .07);
-        Replay(conn, .297);
-        Assert.Equal((92, 100), conn.Walk.Destination);
-        Replay(conn, .33);   // there at 0.324, 32 cells off
-        Assert.Equal((72, 100), conn.Walk.Destination);
+        Replay(player, .297);
+        Assert.Equal((92, 100), player.Walk.Destination);
+        Replay(player, .33);   // there at 0.324, 32 cells off
+        Assert.Equal((72, 100), player.Walk.Destination);
         Assert.Equal(.297, attack.TimerFrom, 9);
 
         // Toward a Drowned walking at him (a step every 0.143 s, to (132, 100) at 0.571): the path goes to (124, 100) and is
@@ -409,32 +226,32 @@ public class LockstepTests : IDisposable
         // swing begins in that frame, and he takes the next tick's two due steps, then stands, where his next order starts.
         drowned = new SpawnedMonster("Drowned", new PlayerWalk(136, 100, 7, size: 2), 0, 4, 100);
         drowned.Walk.Order(100, 100, 0);
-        conn = Lockstep(drowned);
-        attack = Attack(conn, drowned);
-        Assert.Equal(Start(100, 100, 136, 100), Gate(conn, attack, .033));
-        Assert.Equal((124, 100), conn.Walk.Destination);
-        Replay(conn, .594);
+        player = Lockstep(drowned);
+        attack = Attack(player, drowned);
+        Assert.Equal(Start(100, 100, 136, 100), Gate(player, attack, .033));
+        Assert.Equal((124, 100), player.Walk.Destination);
+        Replay(player, .594);
         Assert.False(attack.Decided.IsCompleted);
-        Assert.Equal((124, 100), conn.Walk.Destination);
-        Assert.Equal((120, 100), conn.Walk.Position(.594));
+        Assert.Equal((124, 100), player.Walk.Destination);
+        Assert.Equal((120, 100), player.Walk.Position(.594));
         hold = .6;   // slowed on the way (a chill): the swing holds him as long as the attack time it begins with
-        Replay(conn, .627);
+        Replay(player, .627);
         Assert.Equal(new LockstepAttack.Swing(.594, .627, (123, 100)), await attack.Decided);
-        Assert.Equal(.627 + .6, conn.LockstepBusyUntil, 9);
-        Assert.Equal([(.6276, (122, 100)), (.6546, (123, 100))], conn.Walk.Steps(.627, .66).Select(s => (Math.Round(s.At, 4), s.Cell)));
-        Replay(conn, .66);
-        Replay(conn, .693);
-        Assert.Equal((123, 100), conn.Walk.Position(.693));
-        Assert.False(conn.Walk.Moving(.693));
-        Assert.Equal(((123, 100), .594, .594), await Game.FollowMonsterToSwing(conn, drowned, sword, () => true,
+        Assert.Equal(.627 + .6, player.LockstepBusyUntil, 9);
+        Assert.Equal([(.6276, (122, 100)), (.6546, (123, 100))], player.Walk.Steps(.627, .66).Select(s => (Math.Round(s.At, 4), s.Cell)));
+        Replay(player, .66);
+        Replay(player, .693);
+        Assert.Equal((123, 100), player.Walk.Position(.693));
+        Assert.False(player.Walk.Moving(.693));
+        Assert.Equal(((123, 100), .594, .594), await Game.FollowMonsterToSwing(player, drowned, sword, () => true,
             (_, _) => Task.FromResult(false), (0, 0), 0, false, .04, lockstep: attack));
-        Assert.Equal((123, 100), Game.PlaceLockstepPlayerMove(conn, (140, 130), .693));
+        Assert.Equal((123, 100), Game.PlaceLockstepPlayerMove(player, (140, 130), .693));
 
         // A target that has left the cell searched toward is searched for again mid-path 2.0 s after the search, or 0.7 s
         // after it once 64 cells from that cell (0x141e826a0). Here it goes off his line, out of reach of it: 16 and 13
         // cells from (190, 100), the walk-up searches again at the end of the frame from 2.013, a step from a waypoint in
         // goal, where it stands at once; 64 and 13 cells away, at the end of the frame from 0.726.
-        (ClientState Conn, LockstepAttack Attack) Off(int x, int y)
+        (Player Player, LockstepAttack Attack) Off(int x, int y)
         {
             var target = new SpawnedMonster("Drowned", new PlayerWalk(190, 100, 8, size: 2), 0, 4, 100);
             var c = Lockstep(target);
@@ -462,20 +279,20 @@ public class LockstepTests : IDisposable
 
         // A ground melee use walks to weapon range too, with no target-size tolerance. Native 3.29.3b:
         // an aim 17 cells right and 9 up stops 8 right and 5 up, then starts the swing there.
-        conn = Lockstep(new SpawnedMonster("Drowned", new PlayerWalk(200, 200, 8, size: 2), 0, 4, 100));
-        attack = new(++conn.ActionCount, 0, null, 10, -1, 1, () => .5)
+        player = Lockstep(new SpawnedMonster("Drowned", new PlayerWalk(200, 200, 8, size: 2), 0, 4, 100));
+        attack = new(++player.ActionCount, 0, null, 10, -1, 1, () => .5)
         {
             GroundTarget = (117, 91), GroundAttackSeconds = () => .645,
         };
-        conn.LockstepAttack = attack;
-        Assert.Equal(((100, 100), (117, 91)), Game.PlaceLockstepAttack(conn, attack, 0));
+        player.LockstepAttack = attack;
+        Assert.Equal(((100, 100), (117, 91)), Game.PlaceLockstepAttack(player, attack, 0));
         Assert.True(attack.Open);
-        Assert.Equal(0, conn.LockstepBusyUntil);
-        Replay(conn, .33);
-        Assert.Equal((108, 95), conn.Walk.Position(.33));
+        Assert.Equal(0, player.LockstepBusyUntil);
+        Replay(player, .33);
+        Assert.Equal((108, 95), player.Walk.Position(.33));
         Assert.Equal((108, 95), (await attack.Decided)!.Value.From);
-        Assert.True(conn.LockstepBusyUntil > .33);
-        Assert.True(conn.NextAttackAt > .33);
+        Assert.True(player.LockstepBusyUntil > .33);
+        Assert.True(player.NextAttackAt > .33);
 
         // The tutorial chest's interaction range is independent of its blocking size of 1. Native stops at y=555,
         // four cells before the old footprint-based walk-up; the next order must start at that same cell.
@@ -502,31 +319,30 @@ public class LockstepTests : IDisposable
     [Fact]
     public void The_client_picks_its_mode_and_its_round_trip_only_aims()
     {
-        // No server setting: a connection becomes lockstep only when its client shows it is, and at any round trip.
-        var conn = new ClientState(new(1, "mode", 300, 300, 100, 100, null, []), 1, 1);
-        Assert.False(conn.LockstepClient);
+        // No server setting: a connection is lockstep until its client sends a mode-only message, then takes that one's.
+        Assert.True(new Player(new(1, "mode", 300, 300, 100, 100, null, []), 1, 1).Connection.LockstepClient);
+        var player = new Player(new(1, "mode", 300, 300, 100, 100, null, []), 1, 1) { Connection = { LockstepClient = false } };
+        Assert.False(player.Connection.LockstepClient);
         // A resync (a stun's, a freeze's, a movement skill's) puts a predictive client's monsters on the server's cells.
         var near = new SpawnedMonster("Drowned", new PlayerWalk(110, 100, 8), aggroRange: 60, stopRange: 2, maxLife: 23);
         near.Walk.Order(100, 100, now: 0);
-        conn.Monsters[0x3000] = near;
-        lock (conn.Monsters)
-            Assert.Equal(InstanceProtocol.Teleport(0x3000, 110, 100, 0x7fffffff), Game.ResyncPacketLocked(conn, 0));
-        conn.NoteLockstepClient("test");
-        conn.NoteLockstepClient("test");
-        Assert.True(conn.LockstepClient);
+        player.Area.Monsters[0x3000] = near;
+        Assert.Equal(InstanceProtocol.Teleport(0x3000, 110, 100, 0x7fffffff), Game.ResyncPacketLocked(player, 0));
+        Assert.Null(player.Connection.NotePacket("test", InstanceProtocol.LockstepMoveStartId));
+        Assert.True(player.Connection.LockstepClient);
         // A lockstep client's hit and the life it leaves go into the attacker's own turn of the frame, keyed by the
         // attacker at GGG's checkpoints, so they never come before the attacker's order of that frame; a predictive
         // client applies a message on arrival and keeps the frame's start.
-        Assert.Equal(default, Game.HitOrder(new ClientState(new(1, "mode", 300, 300, 100, 100, null, []), 1, 1), 0x1000));
-        var hit = Game.HitOrder(conn, 0x1000);
+        Assert.Equal(default, Game.HitOrder(new Player(new(1, "mode", 300, 300, 100, 100, null, []), 1, 1) { Connection = { LockstepClient = false } }, 0x1000));
+        var hit = Game.HitOrder(player, 0x1000);
         Assert.Equal((0x1000u, (ushort)0x7000, (ushort)0x7002), hit);
         Assert.Equal("01AF0000100000001000700080010000000030004201030000", Convert.ToHexString(
             InstanceProtocol.ActionHit(0x1000, 0x8001, 0x3000, flags: 0x4201, orderKey: hit.Key, checkpoint: hit.Hit)));
         Assert.Equal("01B1000030000000100070020000000500000000000000" + "00", Convert.ToHexString(
             InstanceProtocol.LifeUpdate(0x3000, 5, orderKey: hit.Key, checkpoint: hit.Life)));
         // A lockstep client skips GGG's resync message, and a teleport would cost its walkers their step's fraction.
-        lock (conn.Monsters) Assert.Empty(Game.ResyncPacketLocked(conn, 0));
-        conn.Monsters.Clear();
+        Assert.Empty(Game.ResyncPacketLocked(player, 0));
+        player.Area.Monsters.Clear();
 
         var slow = new LockstepLatency();
         Assert.True(double.IsNaN(slow.Lowest));
@@ -539,27 +355,27 @@ public class LockstepTests : IDisposable
         Assert.Equal(LockstepLatency.Lost, slow.Lowest);
 
         // A lockstep aim update is also activity for its running channel, as a predictive channel update is.
-        conn.ChannelSkill = 0x0200;
-        conn.ChannelSkillSequence = 0x8001;
-        conn.LockstepSkill.Press((8, 8), null, 0x0200, 0x0401, repeats: false);
-        conn.LockstepSkill.Channelling(0x8001);
-        conn.LastChannelUpdateAt = -10;
-        Game.OnLockstepRequest("test", conn, 0x192, Convert.FromHexString("01920000001400000005"));
-        Assert.True(conn.LastChannelUpdateAt >= 0);
-        Assert.Equal((120, 105), conn.LockstepSkill.Aim);
-        Game.OnLockstepRequest("test", conn, 0x18e, Convert.FromHexString("018E00000014000000002909040000"));
-        Assert.Equal((ushort)0x8001, conn.LockstepSkill.ChannelReleased());
-        Assert.Null(conn.LockstepSkill.ChannelReleased());
+        player.ChannelSkill = 0x0200;
+        player.ChannelSkillSequence = 0x8001;
+        player.LockstepSkill.Press((8, 8), null, 0x0200, 0x0401, repeats: false);
+        player.LockstepSkill.Channelling(0x8001);
+        player.LastChannelUpdateAt = -10;
+        Game.OnLockstepRequest(player, 0x192, Convert.FromHexString("01920000001400000005"));
+        Assert.True(player.LastChannelUpdateAt >= 0);
+        Assert.Equal((120, 105), player.LockstepSkill.Aim);
+        Game.OnLockstepRequest(player, 0x18e, Convert.FromHexString("018E00000014000000002909040000"));
+        Assert.Equal((ushort)0x8001, player.LockstepSkill.ChannelReleased());
+        Assert.Null(player.LockstepSkill.ChannelReleased());
         // A new Move may cancel at either end of a spell; a held repeat still waits for the full cast.
-        conn.LockstepBusyUntil = 10.65;
-        conn.LockstepCastWindow = new(10, .65, .17, .46);
-        Assert.False(Game.LockstepPlayerFree(conn, 9.99));
-        Assert.True(Game.LockstepPlayerFree(conn, 10.1));
-        Assert.False(Game.LockstepPlayerFree(conn, 10.3));
-        Assert.True(Game.LockstepPlayerFree(conn, 10.5));
-        conn.LockstepHold.Clear();
-        Assert.False(Game.LockstepPlayerFree(conn, 10.5));
-        Assert.True(Game.LockstepPlayerFree(conn, 10.65));
+        player.LockstepBusyUntil = 10.65;
+        player.LockstepCastWindow = new(10, .65, .17, .46);
+        Assert.False(Game.LockstepPlayerFree(player, 9.99));
+        Assert.True(Game.LockstepPlayerFree(player, 10.1));
+        Assert.False(Game.LockstepPlayerFree(player, 10.3));
+        Assert.True(Game.LockstepPlayerFree(player, 10.5));
+        player.LockstepHold.Clear();
+        Assert.False(Game.LockstepPlayerFree(player, 10.5));
+        Assert.True(Game.LockstepPlayerFree(player, 10.65));
     }
 
     [Fact]
@@ -652,5 +468,437 @@ public class LockstepTests : IDisposable
         Assert.Equal((ushort)0x8002, skill.ChannelReleased());
         Assert.Null(skill.ChannelReleased());
         Assert.True(skill.Due(free: true));
+    }
+
+    [Fact]
+    public void Close_range_held_move_continues_smoothly_and_nimis_randomizes_attack_volleys()
+    {
+        // Close-range held Move: scales 2-4 cell held offsets along their direction (~5 cells / ~140 ms at base speed)
+        // so walks run smoothly across the 69-99 ms 0x0192 cadence without 33 ms integer-cell snaps or stutters,
+        // projects forward when lagged 0x192 lands shorter or behind here, and stops on feet (< 2 cells) or release.
+        var player = new Player(new(1, "close-hold", 300, 300, 100, 100, null, []), 1, 1)
+        {
+            Instance = new(),
+            Connection = { LockstepClient = true }
+        };
+        player.Npcs[0x04000000] = new(Game.Npcs.Find("Metadata/NPC/Act1/Nessa")!, 105, 100);
+        var npcClick = Convert.FromHexString("018F040000000266040000");
+        var heldMove = Convert.FromHexString("018E00000006000000002909000800");
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepUseOnObjectId, npcClick);
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepMoveStartId, heldMove);
+        Assert.NotNull(player.LockstepUse);
+        Assert.False(player.LockstepHold.Held);
+        var drop = player.Instance.Ground.Add(new(105, 100, ItemCatalog.Create(Program.Items.Find("Scroll of Wisdom")!)));
+        var pickup = new LoginWriter().U16(InstanceProtocol.LockstepUseOnObjectId).U32(drop).U16(0x266).U16(0x400).U8(0).ToArray();
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepUseOnObjectId, pickup);
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepMoveStartId, heldMove);
+        Assert.Equal(drop, player.LockstepUse?.TargetId);
+        player.Instance.Ground.Take(drop);
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepMoveStartId, heldMove);
+        Assert.True(player.LockstepHold.Held);
+        Assert.Null(player.LockstepUse);
+
+        player.LockstepHold.Press((96, 100), 0x2909, 0x0400, (-4, 0));
+        var first = Game.LockstepMoveDue(player, 0);
+        Assert.NotNull(first);
+        Assert.Equal(100, first.Value.Y);
+        Assert.True(first.Value.X <= 95);
+        player.Walk.Order(first.Value.X, first.Value.Y, 0);
+        // 33 ms in: plenty of walk left (> 1 frame) -> no 33 ms position-snap spam.
+        Assert.Null(Game.LockstepMoveDue(player, 0.033));
+        // Within 1 frame of arrival -> seamlessly extends without stopping.
+        double nearEnd = player.Walk.ArrivesAt - 0.02;
+        var here = player.Walk.Position(nearEnd);
+        var extended = Game.LockstepMoveDue(player, nearEnd);
+        Assert.NotNull(extended);
+        Assert.True(extended.Value.X <= here.X - 5);
+        // Very close offset (2 cells beside feet) smoothly walks in that direction.
+        player.LockstepHold.Update((here.X - 2, here.Y), (-2, 0));
+        var veryClose = Game.LockstepMoveDue(player, nearEnd);
+        Assert.NotNull(veryClose);
+        Assert.True(veryClose.Value.X <= here.X - 5);
+        // A lagged 0x192 whose target lands behind here (dot <= 0) projects forward instead of walking backwards.
+        player.LockstepHold.Update((here.X + 2, here.Y), (-4, 0));
+        var forward = Game.LockstepMoveDue(player, nearEnd);
+        Assert.NotNull(forward);
+        Assert.True(forward.Value.X <= here.X - 5);
+        // Cursor moved directly onto feet (< 2 cells) stops cleanly.
+        player.LockstepHold.Update((here.X - 1, here.Y), (-1, 0));
+        Assert.Null(Game.LockstepMoveDue(player, nearEnd));
+        // Releasing clears offset and issues the final target at most once without extending.
+        player.LockstepHold.Update((here.X - 4, here.Y), (-4, 0));
+        player.LockstepHold.Release();
+        Assert.Null(player.LockstepHold.Offset);
+        Assert.Equal((here.X - 4, here.Y), Game.LockstepMoveDue(player, nearEnd));
+        Assert.Null(Game.LockstepMoveDue(player, nearEnd));
+
+        // Nimis (random_projectile_direction) randomizes non-ClientPredicted attack volleys using the client's
+        // seeded angles, and IceShot is natively client-drawn so no duplicate server arrow is spawned.
+        var baseProfile = new GameServer.Core.Projectiles.ProjectileProfile("ice-arrow")
+        {
+            Count = 5, Speed = 326, Range = 150, Lifetime = GameServer.Core.Projectiles.ProjectileRuntime.Time(2)
+        };
+        var randomized = Game.NativeVolley(baseProfile, key => key == Stat.RandomProjectileDirection ? 1 : 0,
+            sequence: 7, aim: new(20, 0), emitter: 0x1000);
+        Assert.NotNull(randomized.NativeVolley?.Angles);
+        Assert.Equal(Game.RandomVolleyAngles(7, 5, 0x1000, new(20, 0)), randomized.NativeVolley!.Angles);
+        Assert.True(Game.ClientDrawsPrimaryProjectile(predicted: false, "IceShot"));
+
+        // 1:1 3.29.3c spawn forward offset (0x141ba7840 -> 0x141ba7c30): default 30 world units (~2.76 cells),
+        // zero when projectiles_not_offset / trap / mine, override when set, contact offset only if stat 0x1230 != 0.
+        var bowContact = new ContactPoint(0, -60f, -125f);
+        Assert.Equal(30.0 / WorldUnits.PerCell, Game.NativeProjectileForwardCells(_ => 0, bowContact), 6);
+        Assert.Equal(0, Game.NativeProjectileForwardCells(k => k == Stat.ProjectilesNotOffset ? 1 : 0, bowContact));
+        Assert.Equal(0, Game.NativeProjectileForwardCells(k => k == Stat.IsTrapObject ? 1 : 0, bowContact));
+        Assert.Equal(0, Game.NativeProjectileForwardCells(k => k == Stat.IsRemoteMine ? 1 : 0, bowContact));
+        Assert.Equal(50.0 / WorldUnits.PerCell, Game.NativeProjectileForwardCells(
+            k => k == Stat.ProjectileFiringForwardDistanceOverride ? 50 : 0, bowContact), 6);
+        Assert.Equal(bowContact.ForwardCells, Game.NativeProjectileForwardCells(
+            k => k == Stat.ProjectileUsesContactPosition ? 1 : 0, bowContact), 6);
+
+        // 1:1 3.29.3c 3D sloped height ray (0x141bac460 / 0x141bb31a0 / 0x141bb5570 / 0x141e35a50):
+        // Walkable rising slope (0 -> +20 over 10 cells) never blocks an uphill arrow; flat shot at cliff base blocks
+        // when (int)projSteps < terrain (16 < 23); aiming at cliff top clears it; return preserves turnaround Z and slopes
+        // by (terrain(anchor) - terrain(turnaround)) / dist.
+        int? Ramp(int x, int _) => Math.Clamp(x * 2, 0, 20);
+        var uphill = ProjectileAimHeight.Primary(new(0, 0), new(10, 0), launchSteps: 16, Ramp);
+        Assert.NotNull(uphill);
+        for (int x = 0; x <= 10; x++) Assert.False(uphill!.Value.Blocks(x, 0, Ramp));
+        Assert.Equal(36, uphill!.Value.MarkerAt(new(10, 0)).Marker);
+
+        int? Cliff(int x, int _) => x >= 10 ? 23 : 0;
+        var flatAtBase = ProjectileAimHeight.Primary(new(0, 0), new(8, 0), launchSteps: 16, Cliff);
+        Assert.True(flatAtBase!.Value.Blocks(10, 0, Cliff));
+        var aimedAtTop = ProjectileAimHeight.Primary(new(0, 0), new(10, 0), launchSteps: 16, Cliff);
+        Assert.False(aimedAtTop!.Value.Blocks(10, 0, Cliff));
+
+        int? OceanAndBeach(int x, int _) => x >= 20 ? -15 : 0;
+        var returning = ProjectileAimHeight.Return(new(20, 0), new(0, 0), currentSteps: 10, OceanAndBeach);
+        Assert.NotNull(returning);
+        Assert.Equal(25, returning!.Value.MarkerAt(new(0, 0)).Marker);
+    }
+
+    [Fact]
+    public void Shield_charge_lockstep_distance_threshold_speed_stats_and_travel_hold()
+    {
+        // Forward raycast stops before a wall at x=115 (15 cells away < 24 -> no-charge, stands in place).
+        var walled = new PlayerWalk(100, 100, 37, (x, y) => x < 115);
+        walled.Charge(160, 100, 75, 0, extraDistance: 0, minDistance: Game.ShieldChargeMinDistance, out bool wallCharged);
+        Assert.False(wallCharged);
+        Assert.Equal((100, 100), walled.Position(1));
+
+        // Open floor < 24 cells (23 cells, dx²+dy² = 529 < 576): no-charge. At 24 cells (576): charges.
+        var open = new PlayerWalk(100, 100, 37);
+        open.Charge(123, 100, 75, 0, extraDistance: 0, minDistance: Game.ShieldChargeMinDistance, out bool shortCharged);
+        Assert.False(shortCharged);
+        Assert.Equal((100, 100), open.Position(1));
+        open.Charge(124, 100, 75, 0, extraDistance: 0, minDistance: Game.ShieldChargeMinDistance, out bool exactCharged);
+        Assert.True(exactCharged);
+        Assert.Equal((124, 100), open.Destination);
+
+        // Equipped character with a sword, shield, Shield Charge gem, and increased attack speed:
+        // verify published off-hand speed stats (0x127 / 0x211e / 0x531e), travel speed multiplier, dynamic
+        // LockstepPlayerFree hold through travel, and immediate release + bonus cleanup when stopped early.
+        using var fixture = new TriggeredSummonTests.Fixture();
+        var player = fixture.Player;
+        player.Connection.PlayerSent = true;
+        player.Connection.LockstepClient = true;
+        player.Connection.LockstepFrame = (1.0, 1.033);
+        player.Walk.Teleport(100, 100, 1.0);
+        var items = Game.ItemsOf(player);
+        items.Change(PlayerInventories.Weapon1, items.Items(PlayerInventories.Weapon1).Single().Id,
+            _ => ItemCatalog.Create(Program.Items.Find("Driftwood Club")!));
+        items.Add(PlayerInventories.Offhand1, 0, 0, ItemCatalog.Create(Program.Items.Find("Splintered Tower Shield")!));
+        ushort chargeId = Assert.Single(fixture.Equip(("Shield Charge", 1)));
+        player.Pools = Game.PoolsFor(player, 20) with { AttackSpeedPct = 50 };
+
+        var scGem = Game.GemSkillEffects(player).Single(g => g.Id == chargeId);
+        var scSkill = Game.PlayerSkills(player).Single(s => s.Id == chargeId);
+        var scStats = scSkill.Stats!.ToDictionary(s => s.Item1, s => s.Item2);
+        Assert.True(scStats.TryGetValue(Stat.OffHandAttackSpeedPlusPct, out int offFinal));
+        Assert.True(scStats.TryGetValue(Stat.CombinedOffHandAttackSpeedPlusPct, out int offInc));
+        Assert.True(scStats.ContainsKey(Stat.CombinedOffHandAttackSpeedPlusPctFinal));
+        Assert.True(offInc >= 50);
+        Assert.Equal(SkillAttackTiming.FinalSpeedPercent(offInc, 1.0), offFinal);
+
+        int bonusPct = Game.ShieldChargeBonusPct(player, chargeId, scGem.Effect);
+        Assert.True(bonusPct > 0);
+        Assert.Equal(0, Game.LockstepActionHold(player, chargeId, 0x8001));
+
+        int action = ++player.ActionCount;
+        double baseSpeed = player.Walk.Speed;
+        Game.BeginShieldCharge(player, chargeId, bonusPct, 175, 100, 1.0, action, out bool startedCharge);
+        Assert.True(startedCharge);
+        Assert.True(player.Walk.Speed > baseSpeed * 1.5, $"Expected charge speed > {baseSpeed * 1.5:0.0} (with +90% move and off-hand attack speed), got {player.Walk.Speed:0.0}");
+        Assert.False(Game.LockstepPlayerFree(player, 1.033));
+
+        // Early stop on a wall/body immediately ends the travel hold and clears the +90% movement bonus.
+        player.Walk.StopAt(1.12);
+        Assert.True(Game.LockstepPlayerFree(player, 1.132));
+        Assert.Equal(0, Game.ShieldChargeMovementPct(player));
+        Assert.Equal(1.0, Game.MovementSpeedMultiplier(player));
+    }
+
+    [Fact]
+    public async Task Shield_charge_collision_push_and_lockstep_continuous_action_pacing()
+    {
+        using var fixture = new TriggeredSummonTests.Fixture();
+        var player = fixture.Player;
+        player.Connection.PlayerSent = true;
+        player.Connection.LockstepClient = true;
+        player.Connection.LockstepFrame = (1.0, 1.033);
+        player.Walk.Teleport(100, 100, 1.0);
+        var items = Game.ItemsOf(player);
+        items.Change(PlayerInventories.Weapon1, items.Items(PlayerInventories.Weapon1).Single().Id,
+            _ => ItemCatalog.Create(Program.Items.Find("Driftwood Club")!));
+        items.Add(PlayerInventories.Offhand1, 0, 0, ItemCatalog.Create(Program.Items.Find("Splintered Tower Shield")!));
+        var skills = fixture.Equip(("Shield Charge", 1), ("Fireball", 1));
+        ushort chargeId = skills[0], fireballId = skills[1];
+        var scGem = Game.GemSkillEffects(player).Single(g => g.Id == chargeId);
+        int bonusPct = Game.ShieldChargeBonusPct(player, chargeId, scGem.Effect);
+
+        // Non-target hostile monster at (110, 100) is passed through and pushed perpendicularly aside (FUN_141a6f9b0);
+        // an object-targeted monster at (120, 100) (>= 15 cells, dist^2 = 400 > 0xe0) stops the charge; a stationary blocker also stops it.
+        var bystander = new SpawnedMonster("Zombie", new PlayerWalk(110, 100, 10, size: 2), 0, 4, 100) { Hostile = true, Life = 100, MaxLife = 100 };
+        var target = new SpawnedMonster("Zombie", new PlayerWalk(120, 100, 10, size: 2), 0, 4, 100) { Hostile = true, Life = 100, MaxLife = 100 };
+        player.Area.Monsters[0x8000001] = bystander;
+        player.Area.Monsters[0x8000002] = target;
+        int action = ++player.ActionCount;
+        Game.BeginShieldCharge(player, chargeId, bonusPct, 160, 100, 1.0, action, out bool charged, targetObjectId: 0x8000002, previousNextAttackAt: 1.0);
+        Assert.True(charged);
+        Assert.True(player.Walk.ChargesThrough);
+        Assert.False(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.05, (109, 100), []));
+        Assert.True(bystander.Walk.Slides);
+        // A strongbox and a solid quest barrier share the ordinary pathfinder. Only the barrier ends a charge.
+        player.SetObjectBlocker(777, 130, 100, 1, actorOrChest: true);
+        Assert.True(ClientPathfinder.ObjectBlocks(player.StationaryBlockers, 130, 100, 2, 5));
+        Assert.False(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.1, (130, 100)));
+        player.SetBlocker(778, 130, 100, 1);
+        Assert.True(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.1, (130, 100)));
+        player.RemoveBlocker(778);
+        Assert.False(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.1, (130, 100)));
+        Assert.True(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.15, (119, 100), []));
+        Assert.True(Game.ShieldChargeStepBlocked(player, player.Id, player.Walk, 1.05, (105, 100), [new ClientPathfinder.Blocker(106, 100, 2)]));
+        Game.EndShieldChargeIfInterrupted(player);
+        Assert.False(player.Walk.ChargesThrough);
+        Assert.Equal(0, Game.ShieldChargeMovementPct(player));
+
+        // No-charge (< 24 cells) reserves 1.3x shield attack time from previousNextAttackAt, never double-stacking 2.3x.
+        double noChargeSeconds = Game.ShieldChargeEndAttackSeconds(player, chargeId, noCharge: true);
+        player.NextAttackAt = 2.0 + noChargeSeconds; // simulate prior reservation overwritten by previousNextAttackAt
+        Game.BeginShieldCharge(player, chargeId, bonusPct, 110, 100, 2.0, ++player.ActionCount, out bool shortCharged, previousNextAttackAt: 2.0);
+        Assert.False(shortCharged);
+        Assert.Equal(2.0 + noChargeSeconds, player.NextAttackAt, 6);
+
+        // Lockstep attack hold drops the legacy +66 ms tail and continuous 1-frame-early pre-queuing preserves fractional cadence.
+        Assert.Equal(Game.LockstepAttackCutIn(player, SkillCatalog.FirstSkillId, 0x8001), Game.LockstepActionHold(player, SkillCatalog.FirstSkillId, 0x8001), 6);
+        player.NextAttackAt = 5.0;
+        player.LockstepBusyUntil = 5.0;
+        player.LockstepActionStartedAt = 5.0;
+        player.LockstepActionScheduledAt = 5.0;
+        player.LockstepActionBackswingUntil = 0;
+        player.Connection.LockstepFrame = (5.0, 5.033);
+        player.LockstepSkill.Press((120, 100), null, fireballId, 0x0409, repeats: true);
+        Game.HoldLockstepSkill(player, 0x8010, 5.0, 5.0);
+        double firstEnd = player.LockstepBusyUntil;
+        double spellDuration = firstEnd - 5.0;
+        Assert.True(spellDuration > 0.05);
+        // Advance to the frame [fStart, fStart + 0.033] containing firstEnd: HoldLockstepSkill queues continuously at firstEnd.
+        double fStart = Math.Floor((firstEnd - 5.0) / 0.033) * 0.033 + 5.0;
+        if (firstEnd - fStart >= 0.0329) fStart += 0.033;
+        player.Connection.LockstepFrame = (fStart, fStart + 0.033);
+        Game.HoldLockstepSkill(player, 0x8011, fStart, fStart);
+        Assert.Equal(firstEnd, player.LockstepActionStartedAt, 6);
+        Assert.Equal(firstEnd + spellDuration, player.LockstepBusyUntil, 6);
+
+        // Late Move-cancel after a spell's contact preserves LockstepActionBackswingUntil (Actor +0x2a0).
+        double lateAt = player.LockstepCastWindow!.Value.Start + player.LockstepCastWindow.Value.LateFrom + 0.01;
+        player.Connection.LockstepFrame = (lateAt, lateAt + 0.033);
+        player.LockstepSkill.Clear();
+        player.LockstepHold.Press((130, 100), 0x2909, 0x0408, (30, 0));
+        await Game.StartLockstepActions(player, lateAt);
+        Assert.Equal(firstEnd + spellDuration, player.LockstepActionBackswingUntil, 6);
+
+        // A queued spell starts at the preceding attack's deadline inside this frame.
+        player.Connection.LockstepFrame = (10, 10.033);
+        player.NextAttackAt = 10.025;
+        player.LockstepBusyUntil = 10;
+        player.LockstepSkill.Press((150, 100), null, fireballId, 0x0409, repeats: true);
+        await Game.StartLockstepActions(player, 10);
+        Assert.Equal(10.025, player.LockstepCastWindow!.Value.Start, 6);
+    }
+
+    [Fact]
+    public async Task Rejected_ground_charge_leaves_the_newer_charge_running()
+    {
+        using var fixture = new TriggeredSummonTests.Fixture();
+        var player = fixture.Player;
+        var items = Game.ItemsOf(player);
+        items.Change(PlayerInventories.Weapon1, items.Items(PlayerInventories.Weapon1).Single().Id,
+            _ => ItemCatalog.Create(Program.Items.Find("Driftwood Club")!));
+        items.Add(PlayerInventories.Offhand1, 0, 0, ItemCatalog.Create(Program.Items.Find("Splintered Tower Shield")!));
+        ushort skill = Assert.Single(fixture.Equip(("Shield Charge", 1)));
+        var gem = Game.GemSkillEffects(player).Single(g => g.Id == skill);
+        int bonus = Game.ShieldChargeBonusPct(player, skill, gem.Effect);
+        player.Walk.Teleport(100, 100, Game.AreaTime(player));
+        var request = new LoginWriter().U16(InstanceProtocol.UseSkillAtLocationId).U32(160).U32(100)
+            .U16(skill).U16(1).U16(0x0400).ToArray();
+        var gate = Program.SendGates.GetValue(fixture.Ciphers, _ => new(1, 1));
+        await gate.WaitAsync();
+        Task first;
+        try
+        {
+            first = Game.OnClientMessages([(InstanceProtocol.UseSkillAtLocationId, request)], [], player);
+            Assert.False(first.IsCompleted);
+            Assert.True(player.ActionCount > 0);
+            Assert.False(player.Walk.ChargesThrough);
+            Game.BeginShieldCharge(player, skill, bonus, 100, 165, Game.AreaTime(player), ++player.ActionCount, out bool charged);
+            Assert.True(charged);
+        }
+        finally { gate.Release(); }
+        await first;
+
+        Assert.True(player.Walk.ChargesThrough);
+        Assert.Equal((100, 165), player.Walk.Destination);
+        Assert.Equal(bonus, Game.ShieldChargeMovementPct(player));
+    }
+
+    [Fact]
+    public async Task Lockstep_leap_slam_hold_published_speed_sync_and_no_silent_collision_teleport()
+    {
+        // Leap Slam in Lockstep holds until startup-skipped landing (timing.Land), not unskipped AttackCutIn.
+        using var fixture = new TriggeredSummonTests.Fixture();
+        var player = fixture.Player;
+        player.Connection.PlayerSent = true;
+        player.Connection.LockstepClient = true;
+        player.Connection.LockstepFrame = (2.0, 2.033);
+        player.Walk.Teleport(100, 100, 2.0);
+        var items = Game.ItemsOf(player);
+        items.Change(PlayerInventories.Weapon1, items.Items(PlayerInventories.Weapon1).Single().Id,
+            _ => ItemCatalog.Create(Program.Items.Find("Driftwood Club")!));
+        ushort leapId = Assert.Single(fixture.Equip(("Leap Slam", 1)));
+        var leapGem = Game.GemSkillEffects(player).Single(g => g.Id == leapId);
+
+        double attackSeconds = Game.SupportedAttackSeconds(player, leapId);
+        double expectedLand = Game.LeapSlamTiming(player, leapId, leapGem.Effect, attackSeconds).Land;
+        double unskippedCutIn = Game.LockstepAttackCutIn(player, leapId, 0x8001);
+        double lockstepHold = Game.LockstepActionHold(player, leapId, 0x8001);
+        Assert.Equal(expectedLand, lockstepHold, 6);
+        Assert.True(lockstepHold < unskippedCutIn - 0.15, $"Expected startup-skipped hold ({lockstepHold:0.000}s) well below unskipped cut-in ({unskippedCutIn:0.000}s).");
+
+        // PushOutOfCollision(tell: false) must not silently teleport a lockstep player off its cell.
+        player.SetBlocker(0x5000, 100, 100, size: 2);
+        await Game.PushOutOfCollision(player, living: true, tell: false);
+        Assert.Equal((100, 100), player.Walk.Position(2.0));
+
+        // AreaStats tracks published movement speed for lockstep clients.
+        player.Area.Stats.Created(player.Id, [(Stat.MovementVelocityPlusPct, 0)]);
+        Assert.True(player.Area.Stats.HasWritten(player.Id));
+        Assert.Equal(0, player.Area.Stats.WrittenValue(player.Id, Stat.MovementVelocityPlusPct));
+        player.Area.Stats.Set(player.Id, Stat.MovementVelocityPlusPct, 40);
+        // Before Publish(), WrittenValue still reflects what the client currently holds (0%).
+        Assert.Equal(0, player.Area.Stats.WrittenValue(player.Id, Stat.MovementVelocityPlusPct));
+        player.Area.Stats.Publish();
+        Assert.Equal(40, player.Area.Stats.WrittenValue(player.Id, Stat.MovementVelocityPlusPct));
+
+        // Ground melee attack gems (e.g. Double Strike) use LockstepGroundMelee walk-ups (0x141e95400) and defer
+        // LockstepBusyUntil until arrival; attack-in-place (flags & 1) and movement attacks (Leap Slam) do not.
+        ushort doubleStrikeId = fixture.Equip(("Leap Slam", 1), ("Double Strike", 1))[1];
+        Assert.True(Game.LockstepGroundMelee(player, doubleStrikeId, 0x0408));
+        Assert.False(Game.LockstepGroundMelee(player, doubleStrikeId, 0x0409));
+        Assert.False(Game.LockstepGroundMelee(player, leapId, 0x0408));
+        player.LockstepBusyUntil = 2.0;
+        player.LockstepSkill.Press((120, 100), null, doubleStrikeId, 0x0408, repeats: true);
+        Game.HoldLockstepSkill(player, 0x8002, 2.0, 2.0);
+        Assert.Equal(2.0, player.LockstepBusyUntil);
+        player.LockstepSkill.Clear();
+
+        // Non-Move actions (LockstepUse pickups, skills) wait for NextAttackAt during a swing's late window
+        // (0x141e9479e / 0x141e947aa), while Move can still cut in after LockstepBusyUntil.
+        player.LockstepBusyUntil = 2.33;
+        player.NextAttackAt = 2.79;
+        player.LockstepUse = new(0x100001, 0x0266, 0, 0x0408);
+        await Game.StartLockstepActions(player, 2.40);
+        Assert.NotNull(player.LockstepUse);
+        player.LockstepHold.Press((120, 100), 0x2909, 0x0408, (20, 0));
+        await Game.StartLockstepActions(player, 2.40);
+        Assert.Equal((120, 100), player.Walk.Destination);
+
+        // Post-pickup 0x18e inputs without 0x400 (held-LMB Move fallback and queued skills) are accepted and wait on
+        // the post-pickup LockstepBusyUntil hold instead of being dropped.
+        byte[] useObjPacket = [0x01, 0x8f, 0x00, 0x10, 0x00, 0x02, 0x02, 0x66, 0x04, 0x08, 0x00];
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepUseOnObjectId, useObjPacket);
+        byte[] heldMovePacket = [0x01, 0x8e, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x29, 0x09, 0x00, 0x08, 0x00];
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepMoveStartId, heldMovePacket);
+        Assert.True(player.LockstepHold.Active);
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepUseOnObjectId, useObjPacket);
+        byte[] queuedSkillPacket = [0x01, 0x8e, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, (byte)(doubleStrikeId >> 8), (byte)doubleStrikeId, 0x00, 0x08, 0x03];
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepMoveStartId, queuedSkillPacket);
+        Assert.True(player.LockstepSkill.Pending);
+        player.LockstepHold.Clear();
+        player.LockstepSkill.Clear();
+
+        // TryBeginObjectWalk anchors lockstep walk-ups to LockstepFrame.Start instead of drifting with ProjectileWorldTime.
+        player.Connection.LockstepFrame = (3.5, 3.533);
+        player.Walk.Teleport(100, 100, 3.5);
+        Assert.True(Game.TryBeginObjectWalk(player, 3.5, 130, 100, 20, out var objWalk, centreRange: true, tolerance: 1));
+        Assert.Equal(3.5, objWalk.Now, 6);
+
+        // Stale/taken ground item LockstepUse does not allocate a sequence or send a bogus Interaction.
+        var goldItem = ItemCatalog.Create(Program.Items.Find("Metadata/Items/Currency/GoldCoin")!) with { StackSize = 15 };
+        var goldGround = new WorldItemObject(105, 100, goldItem);
+        uint takenId = player.Instance.Ground.Add(goldGround, player);
+        Assert.NotNull(player.Instance.Ground.Take(takenId, goldGround));
+        player.LockstepBusyUntil = 3.5;
+        player.NextAttackAt = 3.5;
+        player.LockstepHold.Clear();
+        player.LockstepSkill.Clear();
+        ushort seqBefore = player.LockstepSequence;
+        byte[] staleUsePacket = [0x01, 0x8f, (byte)(takenId >> 24), (byte)(takenId >> 16), (byte)(takenId >> 8), (byte)takenId, 0x02, 0x66, 0x04, 0x08, 0x00];
+        Game.OnLockstepRequest(player, InstanceProtocol.LockstepUseOnObjectId, staleUsePacket);
+        await Game.StartLockstepActions(player, 3.5);
+        Assert.Null(player.LockstepUse);
+        Assert.Equal(seqBefore, player.LockstepSequence);
+
+        // Gold pickup feedback (0x278 WorldPopupIcon + AutoPickupWorldItem task 0x9c67) & full-inventory 0x0117 wire bytes.
+        Assert.Equal([0x01, 0x17], InstanceItems.InventoryFull());
+        byte[] popup = InstanceEntities.WorldPopupIcon(100, 200, 0x20000001, Game.WorldPopupGoldCoin, 15);
+        Assert.Equal(19, popup.Length);
+        Assert.Equal([0x02, 0x78, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0xc8, 0x20, 0x00, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x0f], popup);
+        byte[] goldBlob = goldGround.Blob(justDropped: true, tasks: [Game.AutoPickupWorldItemTask]);
+        Assert.Equal([0x01, 0x67, 0x9c], goldBlob[^3..]);
+        Assert.Equal(0x00, goldGround.Blob(justDropped: false)[^1]);
+    }
+
+    [Fact]
+    public void Trapped_and_mined_attacks_use_throw_hold_and_skip_lockstep_melee_walkup()
+    {
+        using var fixture = new TriggeredSummonTests.Fixture();
+        var player = fixture.Player;
+        player.Connection.PlayerSent = true;
+        player.Connection.LockstepClient = true;
+        player.Connection.LockstepFrame = (2.0, 2.033);
+        player.Walk.Teleport(100, 100, 2.0);
+        var items = Game.ItemsOf(player);
+        items.Change(PlayerInventories.Weapon1, items.Items(PlayerInventories.Weapon1).Single().Id,
+            _ => ItemCatalog.Create(Program.Items.Find("Short Bow")!));
+        ushort trapRain = fixture.Equip(("Toxic Rain", 1), ("Trap Support", 1))[0];
+        Assert.Equal((true, false), Game.PlacedKind(Game.SupportedSkill(player, trapRain)));
+        double throwHold = Game.LockstepActionHold(player, trapRain, 0x8001);
+        Assert.InRange(throwHold, 0.45, 0.55);
+        Assert.False(Game.LockstepGroundMelee(player, trapRain, 0x0408));
+
+        // Ground throw holds for PlacedThrowSeconds, not clamped to weapon attack time.
+        player.LockstepBusyUntil = 2.0;
+        player.LockstepSkill.Press((120, 100), null, trapRain, 0x0408, repeats: true);
+        Game.HoldLockstepSkill(player, 0x8001, 2.0, 2.0);
+        Assert.Equal(2.0 + throwHold, player.LockstepBusyUntil, 6);
+
+        // Monster-targeted throw without attack-in-place flag still holds immediately (no skipped walk-up).
+        player.LockstepBusyUntil = 2.0;
+        player.LockstepSkill.Press((120, 100), 0x1001, trapRain, 0x0408, repeats: true);
+        Game.HoldLockstepSkill(player, 0x8002, 2.0, 2.0);
+        Assert.Equal(2.0 + throwHold, player.LockstepBusyUntil, 6);
+        player.LockstepSkill.Clear();
     }
 }

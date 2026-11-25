@@ -28,7 +28,8 @@ Part of [Status](../Status.md); what to build next in this area is in
   idle-relaxed animations, e.g. the Goblin Troupe's song) and a portrait in the character panel.
   Built, awaiting live verification: the portrait on the selection screen, skill effects (the Cosmetics tab's skill
   slots, picked with C→S 0x1fa, the effect's stats on that skill,
-  Righteous Fire's ring and buff visuals, restyled at once while it burns, and the projectile and explosion of
+  Righteous Fire's ring and buff visuals, reservation-buff skill cosmetics such as Tempest Shield, auras, heralds and
+  Arctic Armour, shock/chill/freeze ailment visuals, restyled at once when picked, and the projectile and explosion of
   projectile skills such as Fireball).
   Portrait frames (the Social Frame slot): a pick is saved and applies at the next login, as the client's own chat line
   says; the character list shows it at once. Verified live 2026-10-31: the client loaded the `SupporterIconFrame` art at
@@ -38,6 +39,9 @@ Part of [Status](../Status.md); what to build next in this area is in
   class it lists), the Goblin Shaman Skin's town and hideout form (the server sends the morph, its model and
   animation set), Alternate Charge Skins (the charge buffs name the skin's art), and a portal effect on a Portal
   Scroll's portal, which is listed twice so that a slow client cannot miss it and is restyled by a pick while it stands.
+  Verified live 2026-11-22: Flask Effect slots (26-30, one per flask cell) restyle that cell's Mageblood flask buffs
+  and flask phasing; Invisible Flask Effect hides them, at once when picked or emptied. A running utility flask's buff
+  is sent again the same way, not yet checked by eye.
   Code: `InstanceMicrotransactions.cs`, `Microtransactions.cs` (`MtxCatalog`, `CosmeticEffects`), Gateway
   (`AnswerMtxRequest`, `PickCosmetic`, `Looks`, `CosmeticStats`), `CharacterSaves.Cosmetics`, `PetObject`,
   `SpawnPets`, `StepPetFollow`, `SkillSlots`.
@@ -47,6 +51,7 @@ Part of [Status](../Status.md); what to build next in this area is in
 
 ## Partly working
 
+- Offline local MTX shop & mystery/salvage boxes (`0x12c`–`0x139`, `0x204`–`0x206`, `0x26e`, `0x282`): offline ok.
 - Cosmetics skill target lifetime and request validation (issue [#306](https://github.com/Wrathen/LocalExile/issues/306)).
   Key reuse across gem replacements and acceptance of stale/incompatible picks are reproduced in Gateway tests.
   Targets now retain keys only while unchanged; replacements and reappearances get fresh connection-local keys.

@@ -203,6 +203,19 @@ local attack speed is already in its attack time (`SkillCatalog.Unarmed.OffHandA
 (`axe_` / `sword_` / ... `attack_speed_+%`) apply to both hands alike, as they do to the main hand's value (any equipped
 weapon of that type counts).
 
+**Which hand swings is the client's choice, from the action's sequence; no field carries it** (static RE, 3.29.3d,
+code addresses shared with 3.29.3c). The Melee action's hand selector `0x141b725a0` (vtable slot `+0x488`, the same
+rule as the projectile classes' in [hand selection](../re/projectiles/hand-selection.md) §3) asks availability
+`0x1419e7570` (slot `+0x480`): bit 0 when the main hand's weapon class fits the skill, bit 1 the off hand's
+(`0x141eeec70`, §10a: an empty hand is class 104, and a shield or quiver fits only a skill that lists it).
+Only the off hand → off hand; only the main hand or neither → main hand; both → main hand when
+`~(byte action+0x120 + low byte of the sequence at +0x11a) & 1` is 1, Barrage (`projectiles_barrage`) also comparing
+with the parity of `+0x448`. The sequence is the client's (C→S 0x24 / 0x190, echoed in 0x1ab), one more per new
+action, so held uses alternate. The server's `AttackHands` applies the same
+rule with stage 0 for a new use; skills with `skill_double_hits_when_dual_wielding` (Cleave, Dual Strike, Viper
+Strike, Riposte, Whirling Blades and their variants) swing both at once.
+Open: when `0x141b725a0` is called and what `+0x120` holds then (Multistrike repeats and channel stages may advance it).
+
 `CharacterStats`/`PassiveBonus` compute the final attack speed from the player's passives: generic
 `attack_speed_+%`, `melee_attack_speed_+%`, one-/two-handed melee, all one-handed, `axe_` / `sword_` / `mace_` /
 `claw_` / `dagger_` / `wand_` / `bow_` / `staff_attack_speed_+%`, shield and dual-wield stats. Dual wielding (and
@@ -599,7 +612,7 @@ No generator output changes are needed: the multiplier is already extracted.
    `TargetAccuracy.AgainstTarget` at the target's own rarity and position at that moment (§4). Ordinary attacks now
    use the defender's entropy and independent critical confirmation ([20 §2h](20-damage.md#2h-ordinary-attack-evasion-and-critical-confirmation)). A miss is logged and
    sends no life update; spells do not roll accuracy and always hit.
-4. Any later player action (0x25 move, another 0x24) cancels pending contact/release (`ClientState.ActionCount`).
+4. Any later player action (0x25 move, another 0x24) cancels pending contact/release (`Player.ActionCount`).
    A ranged projectile already created keeps its own area lifetime and can still collide after the player moves.
 5. Pacing: one swing per attack time. While the button is held the client sends one 0x24 per swing; a swing may
    arrive up to a quarter of an attack early (jitter) and the schedule stays on the client's cadence. When the server
@@ -940,7 +953,7 @@ Live 2026-10-17: Hungry Corpses walk up, swing (animated) and lower the player's
   path reads the virtual base when the action starts. (The King crash first put down to this, `0xc0000005` at
   `0x19e37bf`, is `GeometryChannelBase::StartChannelling` reading a missing GeometryChannel row:
   [king-in-the-mists](../game/king-in-the-mists.md).)
-- **AI** (`RunMonsterAi`, `MonsterAiCadence`): decisions run at 50 ms intervals of elapsed game time.
+- **AI** (`StartMonsterAi`, `MonsterAiCadence`): decisions run at 50 ms intervals of elapsed game time.
   A late wake runs one decision and schedules the next from the current time; it never replays missed steps.
   Pause freezes game time, and disabled AI or a dead player does not accumulate work to replay afterward.
   Hostile monsters neither chase nor swing while the entry grace period still protects the player.
@@ -1096,7 +1109,7 @@ Live 2026-10-17: Hungry Corpses walk up, swing (animated) and lower the player's
   Whether the client's swing animation follows them is unverified: the swing time is read through the action's stat
   provider (`FUN_141c09560`: 0x221a over 1 + 0x126 / 100, via `FUN_141940aa0`), which may be the skill's own stats in
   the Actor component; those keep the unslowed time.
-- **Player life** (`ClientState.PlayerLife`, from the level/class/passive pools). At 0 the client plays the death
+- **Player life** (`Player.PlayerLife`, from the level/class/passive pools). At 0 the client plays the death
   animation and blocks moving. `/heal` sends full life: 0x1b1 from 0 runs the client's revive. The overhead life bar is
   hidden at 0 (`hide_mini_life_bar`, as for monsters) and shown again on revive.
 
@@ -1560,6 +1573,24 @@ Live 2026-10-18 with the Witch's Fireball. Code: `SkillCatalog.EffectStats`, `Ge
   rate change: `0x141ef1573..0x141ef15aa` only checks base/count changes or an existing zero rate.
   Likewise, SkillStats' `0x14219afcb..0x14219b047` checks modifier/count/override changes, not recovery percentage.
   Therefore updated 3398 alone leaves an active native entry at its old positive rate.
+  A 0x2bc cooldown entry is taken as published (`total` and `remaining` both apply: an 11.365 s entry at rate 2.13 ran
+  5.32 s), and a zero rate on it stops the ring with the icon dark and no sweep, as the official client's frozen entry
+  (`3.00 / 3.00 / rate 0`) shows; the press prediction the client makes from 0x1ce keeps its own rate
+  (`1 + 113 %` = 2.13 here), so the server's entry has to follow it. Every repeated entry replays the bar's cooldown
+  animation, so one press must publish one entry. A 0x53 skill bar rebuild also re-creates the slot and resets its entry
+  to the skill's own recovery rate (a held rate-0 entry sent before the rebuild counted again at rate 2.13 right after
+  it), so a stat-only skill refresh — a guard or self buff starting/ending — does not rebuild the bar; only a skill added
+  or removed does (#1127). Publishing the guard's held rate-0 entry *before* the 0x1ce also skips the press prediction
+  altogether: `startCooldown` (`0x141ef2840`, called from the 0x1ce use through `0x141ef08db`) does not run when a zero-rate
+  entry already exists (Frida: no `startCooldown`, the record's +0x10 vector stays `3.00 / 3.00 / rate 0`). The 0x1ce's
+  native use refresh briefly restores the recovery rate, but the held remaining stays full so the ring does not move;
+  `StartTriggeredGuard`'s held entry behind the 0x1ce freezes the rate again. Without the pre-entry the prediction swept
+  ~109 ms (3.00 → 2.89) on a slow first press before the held entry froze it (#1127).
+  A skill-list refresh (Actor 0x20, `SendSkills`) replaces every skill record, and that replacement refreshes an existing
+  zero-rate entry (the `0x141ef1573` case above): a movement or conditional-item-stat refresh during the buff therefore
+  started the held entry counting again at the recovery rate (Frida: `[3,3,0]` → `[3,3,1]` → counting, live 2026-11-19).
+  `SendSkills` re-publishes the held rate-0 entry behind the list (`HeldGuardCooldownRefresh`), so the bar stays frozen
+  through stat refreshes; a zero-rate refresh replaces the entry without restarting its animation (#1127).
   The cooldown-only Actor 0x40 trailer above fixes that without replacing a skill or consuming another use.
   `0x14219e694..0x14219e7eb` reads its entries; `0x14219e900..0x14219e948` replaces the matching cooldown's vector.
   `InstanceEntities.PlayerSingleUseCooldowns` sends remaining/total **base** seconds, recovery rate, flags `0xffffffff`.
@@ -1614,7 +1645,7 @@ Live 2026-10-18 with the Witch's Fireball. Code: `SkillCatalog.EffectStats`, `Ge
   which the client divides by 60 — so the panel shows the regeneration the tick applies. An **attack** also waits for
   the shared attack timer (`AttackTiming`): the client re-aims a held attack every 50 ms, so before 2026-10-25 every
   use was a swing (Holy Strike: twelve a second, 6 mana each). Attack gem skills and the default attack share
-  `ClientState.NextAttackAt`, a use may arrive a quarter of an attack early, and a use that arrives sooner is ignored:
+  `Player.NextAttackAt`, a use may arrive a quarter of an attack early, and a use that arrives sooner is ignored:
   no cost, no swing, no 0x1b1. The client does not deduct the cost itself (a live trace of its Life pool showed the
   mana change at the server's 0x1b1), so no "cost back" update is needed.
 - **Ground attack in dual wield crashes the client: the off hand's weapon stats were missing (issue #167, fixed
@@ -1818,16 +1849,18 @@ session client; every integer draw replayed with `AnimationVariantSelector.Nativ
 u32 BE y) every ~80 ms while the button is held, and **C→S 0x199** (2 bytes) when it is let go (live captures
 2026-10-23). A channelled spell that stands still sends the same 10 bytes as **C→S 0x198** instead (Winter Orb, live
 2026-11-09: same class and handler, and unregistered it was dropped as an unknown message, so the silence below ended
-the channel one second in); both forms refresh the channel's liveness. 0x197's cell is where the channel is aimed now (the cursor), not the player's cell: the first one, ~90 ms
+the channel one second in); both forms refresh the channel's liveness. The updates do not identify the network mode:
+a native Predictive Cyclone sends 0x25 followed by 0x197 (3.29.3c). The 0x197 cell is where the channel is aimed now
+(the cursor), not the player's cell: the first one, ~90 ms
 after the start, is already at the 0x1ab target 45–60 cells away, then it drifts as the cursor and camera move
 (live 2026-11-08). Taken as the player's cell it put Cyclone's sweeps around the cursor. Cyclone's player walks toward
 it, an order re-aimed on each update, at the movement speed with the gem's `cyclone_movement_speed_+%_final`
-(`ChannelAimedAt`, `ClientState.ChannelMovement`); a channel that stands ignores it. 0x197 does not come at the attack rate.
+(`ChannelAimedAt`, `Player.ChannelMovement`); a channel that stands ignores it. 0x197 does not come at the attack rate.
 The hits run on the server's own timer (`RunChannel`, started with the channel): the first sweep lands as the channel
 starts, then one sweep around the player's current cell every `SupportedAttackSeconds` (the skill's own speed, its
 supports and the player's attack speed, as the tooltip shows), paying the cost each time, until 0x199, any other action,
 running out of mana, death or travel, or when the client's 0x197 updates stop for a second
-(`LastChannelUpdateAt`, `ClientState.ChannelSkill`, `NextChannelHitAt`). One sweep resolves its damage
+(`LastChannelUpdateAt`, `Player.ChannelSkill`, `NextChannelHitAt`). One sweep resolves its damage
 and multiplier once and rolls them per monster; every monster gets its hit, life update and death packet before the
 sweep's deaths run their loot, experience and quest work (`AreaSkillHit`). Before, a sweep recalculated the whole skill
 per monster and handled each death inline, spreading one sweep over up to 1.4 s in a crowd.
@@ -1947,6 +1980,14 @@ The life is set once, at `0x141b3860a`: `skill_effect_duration` (0x168) / 1000 s
 `spark_random_duration_%` (0x4397). That stat is virtual, so the client does not derive it from
 `base_skill_effect_duration`: before the Gateway sent it (`GemSkills`, `SkillDurationModifiers.Seconds`) every client
 spark died on its first tick and none was drawn (live 2026-10-30: sparks drawn).
+
+Twister (`avian_tornado`, ActiveSkills row 1292) also uses Spark's ActionType 57.
+SkillArtVariations `spark` selects ProjectilesArtVariations `spark_tornado` and Projectiles row 369,
+`Metadata/Projectiles/SandTornadoSpark` (speed 250), rather than TriggeredSupportTornado.
+Its 2,500 ms lifetime, nova, always-pierce and Avian-gain trigger come from the Twister stat set.
+The client also needs final `skill_behaviour_variation=4`, absent from that stat set: without it the triggered action
+creates ordinary Spark objects. Spark slot 0x310 selects the tornado branch at `0x141b35587`.
+Variation 4 has no 150-cell leash and forgets client contacts every 100 ms; official server repeat parity remains unverified.
 
 **Spark's wander (live 2026-10-31, Frida `scripts/re/frida/trace-spark-legs.js`, 1,084 sparks).** Each spark is its own
 copy of the Spark action. Its first leg seeds the client's small generator (`0x14146fcd0`, the TinyMT32 key
@@ -2444,6 +2485,8 @@ passive or another item changes which weapons qualify. Because the client still 
 `GemDisabled` / `GemSkillInstanceDisabled` refuse it through `WeaponRestricted`: `SkillCatalog.WeaponRestrictions`
 (the effect's ActiveSkills `WeaponRestriction_ItemClassesKeys`) against the active hands' ItemClasses rows, an empty or
 inactive main hand counting as Unarmed (row 36), either hand fitting. Automated coverage only; awaiting a native check.
+Varunastra also fits any listed one-hand melee class (here and for support restrictions); its ItemClasses row and
+native weapon type stay a sword ([20](20-damage.md) §2b). Support resolution still reads only the main hand.
 
 The rest of `FUN_141eee810` (Frida 2026-11-01, `scripts/re/frida/trace-skill-usable.js` and
 `trace-skill-usable-stats.js`), with ebp the main and esi the off hand's type, every test reading the skill's stats:
@@ -2684,14 +2727,17 @@ The totem base type (`Metadata/Monsters/Totems/Totem`) reads only components the
 Its .ot files make it immobile with `set_is_totem_object`, play `Emerge` as its basic action, block movement and give
 it `monster_inherent_damage_taken_+%_final` -80.
 
-The server (`Totems.Rules.cs`) keeps the player's totems in `ClientState.Totems`, never in `Monsters`: area hits,
+The server (`Totems.Rules.cs`) keeps the player's totems in `Player.Totems`, never in `Monsters`: area hits,
 monster AI, loot, experience and the instance save read only `Monsters`, so none of them sees a totem.
 - Placement: the gem's use pays its mana, then waits the GrantedEffects CastTime (0.6 s) over
   `1 + summon_totem_cast_speed_+% / 100` and the action speed (the wiki's Totem page: cast speed does not apply).
   If the use is still current and the player lives, the totem appears at the aimed cell, moved out of walls and
   monsters as a spawn is.
   The server registers the type (S→C 0x20, `<Id>@<level>`), creates a team-0 monster object (0x2bb) and enters it
-  in the wake zone (0x1a9) in one gated send, so a later Life update never precedes it.
+  in the wake zone (0x1a9) in one gated send, so a later Life update never precedes it, then plays the Emerge basic
+  action at once (0x1ab, 0x1ac): a totem has no Transitionable, so the monster rise's 0x2bc does not apply.
+  The placement wait does not gate on the cast's action token: live 2026-11-09 it dropped six of seven placements whose
+  mana was paid (the client walked 0.38 s after the cast). Source, cooldown, Vaal and channel checks still cancel it.
 - Level and Life: the totem's level is the gem level's `PlayerLevelReq`, as PoB's totem level.
   Its base Life is the variety's minion Life at that level (MonsterTypes `IsPlayerMinion`, `LifeMultiplier` 120:
   24 at gem level 1), times `1 + totem_life_+% / 100`; the maximum goes on the object's stats when it differs.
@@ -2718,6 +2764,7 @@ Fireball's `SkillTotemId = 22` has no dedicated variation; generic intelligence/
 `SkillTotemVariations` keys 3/2, skin 0, varieties 2272/2273. The proxy carries the underlying skill's
 GEPL/statset and clears placement flags; its own entity sends the action and owns/emits the projectile.
 On 3.29.3c the proxy action alone does not draw Spark. Its Projectiles.dat flight clip on server-created objects displays the simulated sparks.
+The same holds for every projectile a totem emits (Fireball checked live 2026-11-19): the server creates it with its rig's flight and impact clips.
 The installed support statset supplies 8000 ms duration, -40% final cast speed and level-one -55% final damage.
 Its `totem_support_gem_level` supplies the monster level. Only placement pays player costs. The actual caster inherits
 owner offensive stats and type prohibitions. Ancestral Bond is `keystone_ancestral_bond` (key 5336), not
@@ -2730,6 +2777,13 @@ Ranged placement is 0.5 s since 3.28, despite older Totem references listing 0.3
 Unimplemented payloads, including Artillery's mortar sequence and Focused Ballista's owner-attack gate, are refused
 before action/cost admission. Enemy targeting of totems, placement range and the aura buff's totem source remain open.
 
+Dedicated totem skills (ActiveSkillType `SummonsTotem`; `SkillTotemId` is on every row) carry the spell totems'
+proxy `0x4000` plus their radius and `skill_is_non_pathing`; with the gem's own `is_totem` the client plays no action. Shockwave Totem is a `Nova`: it casts while a hostile is
+within `base_totem_range` (80) and hits within its radius (24) of itself at the end of each cast, as the Arc totem's hit.
+Devouring Totem eats the nearest corpse in range once a cast while the player misses Life or Mana; the corpse is the
+totem's, not the player's. Decoy Totem (its taunt is the separate `totem_taunt_triggerable`), the ancestral melee
+totems (`ancestor_totem_parent_activiation_range`, owner buffs) and Searing Bond are still refused before cost.
+
 ## 10h. Player minions that fight
 
 The native Actor also has an ownership list, separate from model/team and count stats.
@@ -2737,6 +2791,18 @@ Actor update flag `0x0100` (`0x142199c20`) reads a u16 count followed by `(u32 o
 A zero source removes the id; other entries append, so a changed entry needs removal before addition.
 The native vector at Actor `+0x740` uses twelve-byte entries after widening MinionType.
 `MinionType` rows 1/2/3/4 describe normal/magic/rare/ascended Dominance; 50/51 are ordinary/ascended Absolution.
+`MinionType` row 78 is the Holy Armament. Its body's native `HolyStrikeMinionAttack` reads the main-hand weapon copy.
+
+`ItemisedCorpse` maps the inventory base to its body. The placed corpse carries `is_spectre_corpse`, which the
+client's Life predicate checks alongside the consuming skill context. `SpectreOverrides` maps ordinary corpse
+rows to their raised counterparts. The three Marionette bodies share `AzmeriMannequinReviveAfterTime` with a
+4,000 ms delay.
+
+Phantasmal Might uses BuffDefinitions row 1472 with the spell physical minimum and maximum. The two values per
+Phantasm come from its source's per-level stats.
+
+Spectral Spirits use the `SpectralSummonedSkull` body while the Essence of Insanity grant is active. Soulwrest's
+`TriggeredSummonGhostOnKill` row names a corpse-consumption trigger in its stats and supplies the Phantasm lifetime.
 
 UpgradeMinion's availability check (`0x1412ea7d0`) requires a matching ownership entry.
 It maps a skill id to `0xc000 | (id & 0x3fff)`, or `0x8000 | (id & 0x3fff)` for an id already tagged `0xc000`.
@@ -2746,7 +2812,7 @@ The module publishes a paired normal-skill proxy with that id and a parent refer
 GE `SkillID` supplies `skill_behaviour_variation`: zero selects Absolution and one selects Dominance in this action.
 Native verification covered Absolution and Dominance upgrades and full-cap refreshes with no ordinary sentinel remaining.
 
-A player minion is a monster on the player's team kept in `ClientState.Monsters` and listed in `ClientState.Minions`
+A player minion is a monster on the player's team kept in `Player.Monsters` and listed in `Player.Minions`
 (`PlayerMinions.cs`).
 The Spirit chieftains are the first (section 10f).
 - Spawn: `SpawnMonster` with `friendly: true` (Positioned team 0) and the stats `is_player_minion` and
@@ -2756,7 +2822,7 @@ The Spirit chieftains are the first (section 10f).
   and `minion_movement_speed_+%` become its own damage, attack speed and movement mods at the summon.
 - Kept apart: the instance save (`InstanceMonsters`), the player's area hits and default attack, and the on-kill
   charges skip it; an area change or logout drops it with the connection.
-- AI (`RunMonsterAi`): the monster AI walks a friendly monster with the player and never lets an owned one give up.
+- AI (`StartMonsterAi`): the monster AI walks a friendly monster with the player and never lets an owned one give up.
   A fighting one goes for the nearest living hostile monster within its aggro range of both itself and the player,
   not one lurking unrisen.
   In reach (its `MaximumAttackDistance` plus the target's body) it stops and swings; otherwise it walks to the
@@ -2765,8 +2831,9 @@ The Spirit chieftains are the first (section 10f).
   its attack time.
   There the hit needs both alive and within reach + 2; it rolls the minion's accuracy (DefaultMonsterStats at its
   level) against the target's evasion, then the target's block, then the target's mitigation (`MonsterTakesRolled`).
-  S→C 0x1af shows the hit (the minion as source, flags 0x4601), the target's Life follows, and a kill gives the
-  player experience and loot through `MonsterKilled` (no on-kill charges: the player did not kill it).
+  S→C 0x1af shows the hit (the minion as source, kind 3, flags 0x4201, code by type), the target's Life follows,
+  and a kill gives the player experience and loot through `MonsterKilled` (no on-kill charges: the player did not
+  kill it).
   A minion's hit does not count as the player hitting.
 - End: at its duration's end or the player's death it dies (0x1b3 hiding its Life bar, 0x1b1 Life 0) and its body is
   removed a second later (0x2bd).
@@ -2803,6 +2870,20 @@ Use object stats `is_trap_object` / `is_remote_mine`, not the skill's `is_trap` 
 `BeThrown` (`0x141c11350`) selects the native throw animation; a 0x1ba glide supplies horizontal travel in seconds,
 followed by `Arm` at landing. Actor update flag0 bit7 publishes detonation availability (Actor +0x219 bit3);
 `DetonateMines` admission (`0x141d26730`) reads this bit, not the active-mine stat. Every Actor refresh must retain it.
+A throw takes the trap or mine throwing time (0.6 s and 0.3 s over throwing speed), not the spell's cast time.
+With the button held, the 3.29.3c client sent its next use about 0.39 s after the last (live 2026-11-17, Fireball with
+Trap Support). Under a 0.75 s cast-time wait every held throw but the last was dropped after its cost was paid, so a
+throw replaced after half its time still lands. The flight (0.975 s) and arming (0.5 s) times are not from the client.
+A triggered trap or mine whose skill is a projectile spell releases it from the object, drawn by the server.
+It aims at the nearest enemy within 60 cells, or with none any way (seen on the official client, 2026-11-19).
+A rain skill (Rain of Arrows, Blast Rain, Toxic Rain) comes down around that enemy, or on the object.
+An attack thrown as a trap or mine is paced by the throw, not by the weapon's attack time.
+A trap goes off when its duration ends (a Conversion Trap that was never set off only leaves); a mine is removed.
+A trap or mine removed in the packet that starts its action vanishes without showing it, and one removed in the packet
+that creates another was shown moving to the new one's place (live 2026-11-17), so both removals are sent apart.
+One Detonate Mines use queues every mine: the first goes off at once, each later one `base_mine_detonation_time_ms`
+(250) after the one before, at 10% more detonation speed per mine already in the sequence.
+Held cadence was 5/6 of the computed throw time for both kinds (0.39 s against 0.45 s, 0.246 s against 0.275 s).
 
 ## 10i. Warcry release: timing and release effects
 
@@ -2824,7 +2905,7 @@ hostiles' power; which code consumes the list was not traced, so the server's re
   radius explodes once.
   A corpse is a dead monster at zero Life whose Life type allows corpse use (`MonsterLifeData.IsUsableAsCorpse`) and
   that no explosion has consumed (`SpawnedMonster.CorpseConsumed`).
-  The corpse is removed (S→C 0x2bd) and leaves `ClientState.Monsters`, so no later removal sends it again.
+  The corpse is removed (S→C 0x2bd) and leaves `Player.Monsters`, so no later removal sends it again.
   The explosion hits living hostile monsters within 22 cells of it (PoB `EnemyExplode`, grown by area of effect) for
   the percentage of the corpse's maximum Life as physical damage, scaled by the player's `damage_+%`,
   `physical_damage_+%`, `area_damage_+%` and Frenzy Charge more damage (poewiki Explode).
@@ -2868,48 +2949,51 @@ Found with Frida on 2026-11-01 (`scripts/re/frida/trace-action-state.js`, `trace
 
 **The action.** The client creates the local player's actions in `0x141ef0050` (manager, &action, skill id) and starts
 them in `0x141e937b0`; an action's +0x118 is its type HASH16 and +0x11a the use's sequence (the skill id is not stored
-there; older notes had the two swapped). Shield Charge is type 0x2bc0, vtable `0x14332f508`, constructor `0x1413c9170`.
+there; older notes had the two swapped). Shield Charge is type 0x2bc0, vtable `0x14332f488` (constructor `0x1413c9170`).
 It derives from a moving-attack class (`0x141a6e1e0`) whose per-frame update `0x141a6ea70` has three phases:
 
 - **Travel** (+0x3e5 and +0x3e8 set): the setup `0x141a6e4f0` reads `shield_charge_range_+%`,
-  `shield_charge_extra_distance` and `global_knockback` and lays out the path; the update moves the player at its
-  mover's speed (float +0x240 of `[[action+0xe8]+8]+0x98`) and calls the action's hit function (vtable +0x550,
-  `0x1413c9dc0`, which forwards to `0x141a701d0`) with kind 0 along the way.
+  `shield_charge_extra_distance` and `global_knockback`, clamps to 75 × `(100 + range) / 100` cells (`0x1406722c0`
+  rounds each component), extends by `shield_charge_extra_distance`, and raycasts forward along walkable cells
+  (`0x141a7b120`, stopping before the first unwalkable cell). Travel start `0x141a6ee30` checks `dx² + dy² < 0x240`
+  (24 cells): below 24 cells it sets `+0x3e4 = 1` (no-charge), skips movement completely, and jumps directly to the
+  in-place end bash (`0x141a70910`, `ShieldBash` 0x86 with ×1.3 attack time from `0x2720`
+  `shield_charge_attack_time_+30%_if_no_charge`). At ≥ 24 cells, `CanCancel` (vtable +0x1a8 = `0x141a6fd50`) returns
+  `false` for the entire travel phase (`+0x3e5 != 0`); `0x141a6f320` → `0x141e37560` moves at `+0x3ec` and calls the
+  action's hit function (vtable +0x550, `0x1413c9dc0` → `0x141a701d0`) with kind 0 along the way.
 - **Arrival**: `0x141a6f440` stops the mover and calls vtable +0x530. The parent's `0x141a6f570` would start the end
-  phase at once (kind 2); Shield Charge overrides it with `0x1413c9b70`, which tail-calls `0x141a70910`: the final hit
-  (kind 1), then the end-of-charge attack's animation (`0x141ea0c60`), reading `shield_charge_attack_time_+30%_if_no_charge`.
+  phase at once (kind 2); Shield Charge overrides it with `0x1413c9b70`, which tail-calls `0x141a70910`: clears
+  `+0x3e5 = 0`, lands the final hit (kind 1), and starts the end-of-charge attack (`charge_*_end`, `contact = 0`,
+  so `0x141942e20` lets Move cancel immediately upon arrival).
 - **End phase** (+0x3f8): only `0x141a701d0` with kind 2 sets it, from that animation's completion; it runs the scheduled
   events (count +0x3fc, next +0x400, elapsed +0x404 against duration +0x420) and ends the action.
 
-**The end attack swings the shield.** It reads `off_hand_total_base_weapon_attack_duration_ms`, which the Gateway sent
-only for an off-hand weapon (`SkillCatalog.Unarmed.OffStats`). At 0 the animation started but never completed: the
-end phase never began, the player kept running in place after arriving and no other skill could be used until a walk.
-A shield skill with a shield in the off hand now carries the gem's own GrantedEffectsPerLevel `AttackTime` (Shield
-Charge 500 ms) as `off_hand_base_weapon_attack_duration_ms` and `off_hand_total_base_weapon_attack_duration_ms`
-(`SkillCatalog.AttackTimeMs`, `RequiresShield`); the client adds the +30% itself. Verified live: the charge stops and
-plays its end effect.
+**The end attack swings the shield.** Setup clears `+0x311 = 0` (off-hand), so `0x141b58740` reads
+`off_hand_attack_speed_+%` (`0x127`) alongside `off_hand_total_base_weapon_attack_duration_ms`. At duration 0 the
+animation never completed; without `0x127` the end bash ignored attack speed. Shield skills publish
+`off_hand_base_weapon_attack_duration_ms`, `off_hand_total_base_weapon_attack_duration_ms`, `off_hand_attack_speed_+%`,
+`combined_off_hand_attack_speed_+%` (`0x211e`), and `combined_off_hand_attack_speed_+%_final` (`0x531e`).
 
-**Speed.** The mover's speed comes from `0x141e827a0`: base (+0x548) × (1 + `movement_velocity_+%` / 100) ×
-(1 + `virtual_action_speed_+%` / 100), capped by `movement_velocity_cap`, all read from the player's own Stats component
-(the network getter `0x1424d6510`: sorted (key, value) pairs at +0xf0..+0xf8, then the provider at +0xe0), not the
-skill's record. The game adds the gem's `base_movement_velocity_+%` (+90 at level 1) through the invisible buff
-`shield_charge_movement_speed_while_charging` (BuffDefinitions 1352); network stats run no calculators, so the Gateway
-adds it to the pools' movement speed from the use until its own walk arrives (`ShieldCharge.cs`, `Progression.cs`) and
-sends the player stats at both ends. Its walk estimate goes to the aimed cell at that speed instead of the generic
-movement skill's teleport (§9a). Verified live: `movement_velocity_+%` 22 → 112 → 22, the charge twice as fast; the
-first stats update arrives after the client has started the charge, and the client takes it up mid-charge.
+**Speed.** Travel speed (`0x141a70760`, stored at `+0x3ec`, recalculated on `0xf5`/`0xce6` by stat listener `0x141a70bc0`)
+is `Pathfinding::GetSpeed(player)` (`0x141e827a0`: base × `(1 + movement_velocity_+% / 100)` ×
+`(1 + virtual_action_speed_+% / 100)`, capped by `movement_velocity_cap`) multiplied by
+`(1 + combined_off_hand_attack_speed_+% / 100) × max(0, 1 + combined_off_hand_attack_speed_+%_final / 100)` and capped
+again by `movement_velocity_cap`. The gem's `base_movement_velocity_+%` (+90 at level 1, BuffDefinitions 1352) is added
+into `movement_velocity_+%` and queued directly into `Area.Stats` so the `0x1b3` ships in the same lockstep frame as
+`0x1ab` (`ShieldCharge.cs`, `Progression.cs`).
 
 **Route.** The charge runs no path search. The setup lays a straight line to the aim, up to its maximum distance
-(below); an aim off the floor moves back along the line to the first cell the mover can stand on. Each step is checked
-as a walk's is ([07](07-latency-visibility-movement.md) §5), so the first blocked step ends the run, on a body as on a
-wall. A charge from inside a ring does not move at all (`PlayerWalk.Charge`).
+(below); an aim off the floor moves back along the line to the first cell the mover can stand on. Per-step collision
+(`FUN_141a6f9b0`) passes through non-target Actors and Chests (pushing hostile knockbackable enemies perpendicularly
+aside at `60 × (1 + knockback_speed_+%/100)`), and stops on terrain, stationary non-Actor/non-Chest blockers, or an
+object-targeted monster at ≥ 15 cells (`dist² > 0xe0`). A charge from inside a ring does not move at all
+(`PlayerWalk.Charge`).
 
 **Hits.** The client's (`trace-charge-hits.js`, four charges): kind 0 at its position as it starts and then about every
 100 ms (every ~8 cells at charge speed) within 8 cells (`0x141a70170` returns the range), kind 1 within 16 cells where
-it arrives, and kind 2 (range 28) as the end phase starts. The Gateway lands kind 0 and 1 on its own walk
-(`RunShieldCharge`): path hits every 100 ms within 8 cells, each monster at most once per charge (neighbouring path
-areas overlap), and a final hit within 16 cells reaching every monster there. The generic area hit, which landed once
-around the starting cell, skips Shield Charge. Verified live: path and arrival hits land.
+it arrives, and kind 2 (range 28) when the end animation finishes. The Gateway spaces path hits by distance
+travelled, once per monster along the path. The arrival hit and the forward wave share their target list. A Move
+that cancels the end animation preserves the arrival hit. A queued follow-up preserves a completed wave.
 
 **Maximum distance.** The setup stops a charge aimed further away at 75 cells × (1 + `shield_charge_range_+%` / 100)
 (integer, `(100 + range) * 75 / 100`) along the aim; the Gateway clamps its walk the same way. The setup also adds
@@ -2922,9 +3006,6 @@ at the off hand's speed. Shield Charge's description of `shield_charge_damage_+%
 is "{0}% more Damage with Hits at Maximum Charge Distance": the Gateway scales each hit linearly by the distance from
 the start over the maximum (a guess; the client's ramp is not read). Verified live: level 1 with a 219-armour shield,
 base 51–83, panel 79–136 and 2.1 attacks per second, hits ×1.00 at the start up to ×1.83 at 62 cells.
-
-**Not modelled yet:** the stun and knockback scaling, `shield_charge_extra_distance`, and the end phase's kind-2
-effects.
 
 ## 10f. Synthetic action instructions (S→C 0x1ce / 0x1cf)
 
@@ -3003,9 +3084,10 @@ failed I/O, allocation limits, actual official values and every skill's successf
   cleared the option at the next skill update. The Gateway saves both masks with the bar and sends them back.
 - **The 0x20 skill update can take a bound skill off the bar**: live 2026-10-21, Haste's slot emptied when its aura went
   on (the aura's stats resend every skill record), and the area change's 0x53 brought it back. A gem taken out and
-  socketed again did not get its slot back either. `SendSkills` therefore sends the saved bar (0x53) after every
-  update, unless it adds a skill whose GrantedEffects Id the saved bar does not have: the client binds such a new
-  skill to a free slot itself (0x4e), and a bar sent then would clear it.
+  socketed again did not get its slot back either. `SendSkills` therefore sends the saved bar (0x53) after an
+  update that adds or removes a skill, unless it adds one whose GrantedEffects Id the saved bar does not have: the
+  client binds such a new skill to a free slot itself (0x4e), and a bar sent then would clear it. A stat-only update
+  sends no bar (#1127); live 2026-11-19 (3.29.3c) Wrath on and off kept every bound slot without one.
 - **The Gateway** saves each 0x4e (`CharacterSaves`, `data/characters.db`) as slot → a GrantedEffects Id for gems and the default
   attack (skill ids change with the socketed gems), `Action/<ActionTypes Id>` for a basic action (Move 0x2909 =
   "Move only"), or "" for a cleared slot. It sends 0x53 right after the player and area messages, no delay needed,
@@ -3037,6 +3119,9 @@ failed I/O, allocation limits, actual official values and every skill's successf
   Guard backends also require additional-data element 0: the remaining absorption capacity (or Immortal Call's
   consumed charge count). Getter `0x141f84000` dereferences Buff `+0x80` without a null check; an empty list
   crashes the HUD. Guard definitions are not `IsRecovery`, so no inline stat values precede that list.
+  Hand-cast guards start that same buff (`SelfBuffSkills.cs`). Phase Run and Blood Rage send their rows
+  (`new_phase_run` 467 and `new_phase_run_damage` 468, not the older `phase_run` 65; `blood_rage` 11) as Flicker
+  Strike's buff is sent, with no additional-data list; whether their backends read one is not known (unchecked live).
   The generic source-object/skill labels above are context-dependent: the concrete RapidFireCharge and
   Anticipation repeat backends consume retained Buff `+40/+42/+28` as count, last sequence and a consumed-count
   cache. Existing-instance partial updates copy decoded `+70/+60/+64` into those fields; omitted bit2 count
@@ -3082,16 +3167,25 @@ failed I/O, allocation limits, actual official values and every skill's successf
 - **Righteous Fire** (`ActivateRighteousFire`, `RunPlayerTick`, `BurnAround`): cast on the player itself (§9), it puts
   two buffs on the player: `righteous_fire` (row 12, BuffVisuals 15: `ri_fire/bottom.epk`, the ring at the feet) and
   `righteous_fire_aura` (row 13, BuffVisuals 19: the ignite flames, and for a player model EPKFiles2
-  `ri_fire/player.epk`, the burning hands). Every 250 ms the player loses 90% of maximum life per second
-  (`base_nonlethal_fire_damage_%_of_maximum_life_taken_per_minute` 5400; nonlethal, it stops at 1) and every hostile
-  monster within its radius plus its size loses 70% of the player's maximum life per second
-  (`base_righteous_fire_%_of_max_life_to_deal_to_nearby_per_minute` 4200) and carries `righteous_fire_aura` while
-  inside. It ends at death; casting it again does nothing. **The radius** is `active_skill_base_area_of_effect_radius`
+  `ri_fire/player.epk`, the burning hands). The self-burn is 90% of maximum Life plus 70% of maximum Energy Shield per
+  second (nonlethal, stopping at 1 Life); the enemy burn is 70% of maximum Life plus Energy Shield per second
+  (GrantedEffectStatSets 719, in percent per minute). A hostile monster within its radius plus its size carries
+  `righteous_fire_aura`. It ends at death; casting it again does nothing. RF has no
+  `spell_damage_modifiers_apply_to_skill_dot`, so the enemy burn takes increased area, fire, elemental and DoT damage but
+  not spell damage (as PoB); DoT multipliers add together, and linked supports' more factors multiply. Lifetap and
+  Inspiration count only for the part of a tick while their buff or charges are active. Nothing outgoing scales the self-burn.
+  **The radius** is `active_skill_base_area_of_effect_radius`
   (18 at level 1; one unit is one cell) plus `active_skill_base_radius_+`, scaled as Path of Building's calcRadius:
   floor(base × floor(100 × √(area modifier)) / 100), where the modifier is (1 + `base_skill_area_of_effect_+%` +
   `skill_area_of_effect_+%` + `spell_area_of_effect_+%`) × each `…area_of_effect_+%_final`, then
   × (1 + `active_skill_area_of_effect_radius_+%_final`), from the player's stats under the skill's (`SkillArea`).
   Conditional area stats (per charge, per attribute, "recently") are not modelled.
+  Every player area site reads `Game.SkillAreaStats`: the player's stats hold `base_skill_area_of_effect_+%` and the
+  panel total `skill_area_of_effect_+%` that already includes it, so only the skill's own base form is kept, and the
+  type-scoped increases (`melee_skills_…`, `attack_…`, `warcry_skill_…`, `vaal_skills_…`, totem, trap and mine) are
+  added to the total for a skill of that type. A support's more area multiplies the modifier, so a radius grows by its
+  square root (Fist of War's 59% is ×1.26). Durations go through `SkillDurationModifiers.Seconds`, whose `Kinds`
+  (warcry, Vaal, buff, secondary) pick the type-scoped increases.
 - **Passive blind aura** (`PassiveBuffAuras.BlindTemplate`, §10e). `SaboteurBlind` (Devout of Solaris, Born in the
   Shadows) is `generic_buff_aura` (1521: invisible, no stats, CancelOnDeath) with radius 35 (3.5 m in the wiki's
   distance table). Its effect is not in the definition: unnamed column `__col5` of the generic templates starts with an
@@ -3107,7 +3201,7 @@ failed I/O, allocation limits, actual official values and every skill's successf
   (`GrantedEffectsPerLevelHardmode` in Ruthless; for Devout of Abberath both name the same row) is a
   GrantedEffectsPerLevel row, which names the GrantedEffects row and its level. Only effects whose trigger runs on the server act; the others do nothing, and none
   joins the client's skill list. `RepeatingShockwave` (Abberath's Fury, Devout of Abberath's 45556: level 20, no cost,
-  no cooldown) is triggered by footsteps: `RunFootstepSkills` (a 50 ms poll per connection, stopped while paused) runs
+  no cooldown) is triggered by footsteps: `WakeFootsteps` (a 50 ms poll per connection, stopped while paused) runs
   a run-animation clock while the walk lasts (`Walk.ArrivesAt`), at `Walk.Speed` over the base walking speed, and
   restarts it when the walk ends. The Templar rig's 18 run clips loop in 800 ms with footstepright at 233 ms and
   footstepleft at 633 ms, so each passed event is one trigger. A movement skill teleports the walk, so it takes no
@@ -3390,6 +3484,28 @@ Only self auras with an `AuraCatalog` effect are listed for now: a granted minio
 and listing it would offer the player a skill that does nothing. The Paladin's Paladin Aura options use it
 ([Paladin](../game/paladin.md)).
 
+**Worn-item active grants.** An item mod's `GrantedEffectsPerLevelKeys` reference exact GrantedEffectsPerLevel rows.
+`WornGrantedSkills` resolves those rows through GrantedEffects and preserves their effect id, level and
+ActiveSkills `IsManuallyCasted` value. Doryani's Delusion references GEPL 28267, level-30 Purity of Lightning;
+Severed in Sleep and United in Dream reference GEPL 47391, level-25 Envy; Aul's Uprising references GEPL 47390,
+level-15 Envy. These Mods rows have no nonempty `GrantedEffectRuthless` override, and GemEffects has no HardMode
+alternative for these effects, so the referenced rows remain authoritative in both data modes.
+For a Mods row whose `GrantedEffectRuthless` list is nonempty, HardMode uses those GEPL rows instead and otherwise
+keeps the normal list. The corrupted Determination and Grace controls select GEPL 17798/17486 and effects
+`DeterminationHardMode`/`GraceHardMode`; Standard keeps 17758/17446 and the normal effects.
+Socketed gems, worn grants and passive grants share one ordered source list for `GemSkillIds`, `GemSkillEffects`,
+`SupportedSkill` and admission. A worn grant's stable key is its host item and synthetic host-local source slot, so it
+does not collide with an active gem, a passive node or the same effect on another item. Ordinary support gems in the
+granting host support its active skill independently of link groups; their own level and quality apply, while active
+gem-level/quality bonuses do not raise the grant. SupportsGemsOnly supports such as Empower, Enhance, Enlighten,
+Spellslinger, Automation, Autoexertion and Eclipse are excluded from non-gem grants.
+Only manually cast worn effects with an existing executor are published. Trigger-only rows stay available through
+`AllWornGrantedSkillsOf` for their future trigger owners, and unsupported beast/aspect/Madness/Unhinged/Aegis grants
+remain out of the Actor list. A supported aura keeps its host identity in `AuraCatalog.Aura`; removing or inactivating
+the source ends it without refilling mana, while a still-valid same-family gem or worn host keeps the saved intent and
+takes ownership. A source with no alternative clears that spent intent so equipping another same-effect item does not
+resurrect it. Area entry and relog restoration still enumerate current sources and reject stale ids.
+
 **Triggered passive skills.** A granted triggered skill has no bar use and is never listed, since it runs from its trigger.
 The one with an executor is Summon Elemental Relic, from Paladin's Elemental Valiance and the ordinary Guardian's
 Unwavering Crusade (19641), which have the same buff and grant.
@@ -3405,8 +3521,8 @@ Tests replace `PlayerMinions.Random`.
 **Owned minions** (`PlayerMinions`, `PlayerMinions.cs`). A minion is a monster made by `SpawnMonster` with
 `friendly: true` (Positioned team 0) and the stats `is_player_minion` and `is_semantic_minion` 1 on its Stats component.
 The client reads these two to know the player's minion (the link-target filter 0x141bfaf20).
-`ClientState.Minions` keeps each one's skill, kind, end time, aura on the owner and death explosion, under the Monsters
-lock. `RunPlayerMinions` runs `PlayerMinionsTick` every 100 ms of game time:
+`Player.Minions` keeps each one's skill, kind, end time, aura on the owner and death explosion, under the Monsters
+lock. `StartPlayerMinions` runs `PlayerMinionsTick` every 100 ms of game time:
 
 - A minion whose time is up dies (hide its life bar, 0x1b1 life 0) and explodes; its body goes (0x2bd) a second later.
 - The owner's death or the loss of the granting passive kills it without an explosion; with the passive lost, the
@@ -3467,11 +3583,13 @@ evidence and limits: [Paladin](../game/paladin.md#link-skills).
   alternate-shield flag. `0x1417a9410` dereferences `Buff+0x80` and its second word before any length check;
   `0x1417a9e70` passes the first word to MiscEffectPacks variation lookup. Empty-list activation reproduced
   an access violation at `0x1417a945f`. The base shield visual uses `[0, 0]`.
+  Both the source and received buff instantiate this behaviour and require the list, even with source display disabled.
 
   Temporal Rift (row 1915, `ChronomancerBuff`) also dereferences its list immediately: `0x141f83180`
   allocates the sample ring from word 0, and `0x141f832b0` reads the interval in milliseconds from word 1.
   An empty list reproduced an access violation at `0x141f831b1`. The server uses `[42, 100]`, retaining
   41 samples over four seconds; these sampling parameters are server choices, not captured retail traffic.
+  Both source and received buff packets carry these two words.
 - **Implemented effects.** Purity of Elements/Fire/Ice/Lightning add their resistances; Clarity and Vitality
   add their flat regeneration; Precision adds flat accuracy and increased critical strike chance; Haste adds
   attack, cast and movement speed. Generic
@@ -3522,10 +3640,20 @@ evidence and limits: [Paladin](../game/paladin.md#link-skills).
   - **Masteries:** Mana6, Reservation3 (life efficiency), Reservation4 (area) and Reservation5 (self aura effect) are mapped;
     Reservation1 (damage per aura), Reservation2 (max resistances with reserved life and mana) and Reservation6 (aura
     duration) are not. Skill-specific reservation efficiency/effect stats are not modelled.
-  - **Systems:** supports, party/minion auras and life reservation.
-- **Dev check.** `/auras` prints the active auras, flat/percent reservation, reserved and unreserved mana,
-  reservation efficiency and aura effect. Area changes recreate the player object, so `SendPlayer` puts the
-  running auras' buffs back on it.
+  - **Systems:** party/minion auras and reservation-declining or special supports.
+- **Life reservation.** GEPL `LifeReservationFlat` / `LifeReservationPercent` share the active aura's source identity
+  with Mana reservation. `base_skill_reserve_life_instead_of_mana` moves the whole skill cost to Life; Mana-only aura
+  exemptions leave Life untouched. Worn `life_reserved_by_stat_%` is permanent while its item qualifies (Midnight
+  Bargain rolls 30), while Life reservation efficiency reprices skills per skill before summation. Full maximum Life
+  remains `Pools.Life`; the owner exposes a separate unreserved cap used by payment, leech, flask/recovery, level,
+  resurrection and wire publication. Proposed aura sets use a pure budget check; invalid or over-capacity sets are
+  refused or retired before clamping current Life, retaining a living minimum. Removing a reservation releases the cap
+  without adding current Life. Malachai's Awakening no-Life and Clear Mind no-Mana rows feed supported spell hits;
+  Ivory Tower adds Energy Shield from the final reserved total.
+- **Dev check.** `/auras` prints each aura's Mana and Life flat/percent reservation, reserved and unreserved pools,
+  item versus skill Life reservation, both efficiencies and aura effect. Every player 0x1b1 Life update and the initial
+  PlayerObject carry the same reserved Life. Area changes recreate the player object, so `SendPlayer` puts the running
+  auras' buffs back on it.
 
 ## 14. Character panel sums
 
@@ -4015,8 +4143,9 @@ buffs), `Modules/Core/Game/Combat/Resources/Charges.cs` (the Gateway glue) and `
   takes charges away: Replica Fragility, Replica Pacifism and Replica Powerlessness store `-1` ("Lose an
   Endurance Charge each second") and lose one each second, never below the minimum; every other use of
   the stat is positive. Skills: the Frenzy gem's hit gives a Frenzy Charge once per use (ActiveSkills `frenzy`;
-  without a Frenzy projectile row it hits as an area, and only its first target counts), Power Siphon's
-  killing hit a Power Charge, Flicker Strike's and Power Siphon's own on-hit chances count, and Enduring Cry grants an
+  it fires the weapon's projectile, and only the volley's first enemy hit counts), Flicker Strike's and Power
+  Siphon's own on-hit chances count (Power Siphon's ActiveSkills text names a kill grant no 3.29 stat carries;
+  its stats give 20% on hitting a rare or unique enemy), and Enduring Cry grants an
   Endurance Charge per 5 power (`endurance_charge_granted_per_X_monster_power_during_endurance_warcry`) of the hostile
   monsters within 60 cells grown by area (Path of Building's radius; power 1 normal, 2 magic, 10 rare, 20 unique) when
   its cast ends on the game clock, sped up by the player's and the gem's `warcry_speed_+%` and slowed by action speed
@@ -4068,16 +4197,15 @@ buffs), `Modules/Core/Game/Combat/Resources/Charges.cs` (the Gateway glue) and `
   set with `/set_stat` counts in the charge effects and limits too.
 - **Not modelled.** Held state and gain/expiry for the charge types without a reachable player source here: Spirit
   and Siphoning (their maxima come only from abyss-jewel and Elder/Shaper item counts the server does not model),
-  Blitz and Challenger (no 3.29 player source: their stats appear only in monster/mercenary skill stat sets), Brine
-  and the rest, beyond the three bounded maxima, the converted charges and the Blood Charges above;
-  skills and effects that consume or remove
-  charges (Discharge, Flicker Strike's cooldown bypass, Immortal Call, "lose all … when", expiry triggers); gains that
-  need a stun (other than Unyielding's), freeze, bleed, poison, curses, traps, mines, totems, Vaal souls, other warcries, allies, flask use (the
-  utility flask PR #233) or support gems (Power Charge On Critical, Endurance Charge on Melee Stun); Power Siphon's "or
-  soon after the hit"; Blood Rage (no self-buff skills); conditional maxima and minima (while affected by an aura, on
-  low life, devotion, "count as having maximum", other maximum-equality operators); per-charge stats whose target the
-  server does not calculate (ailments, leech, damage taken, damage over time increases, wand-only or attack-only damage,
-  mana cost, buff duration, Frenzy's and Flicker Strike's own per-charge attack speed and damage).
+  Blitz and Challenger (no 3.29 player source: their stats appear only in monster/mercenary skill stat sets), Brine,
+  Divine, Crab, Fanatic and Celestial, beyond the three bounded maxima, the converted charges and the Blood Charges
+  above; stealing charges (monsters hold none); expiry triggers that use a skill (The Eternal Apple's warcry);
+  gains that need an attack's own freeze or ignite, a taunt, a knockback, close range, totems, mines, Vaal souls,
+  allies or the Charged Traps/Mines supports; Malachai's Loop's self-shock; conditional maxima and minima (while
+  affected by an aura, on low life, devotion, item-set counts); per-charge stats whose target the server does not
+  calculate (damage over time multipliers, wand-only or one skill's damage, damage against low/full-life enemies,
+  attack leech, elemental avoidance, the Flicker Strike enchantment's damage). The
+  other gains, losses, triggers and maxima are `ChargeGains`, `ChargeTriggers`, `ChargeMaxima` and `ChargeScaling`.
 
 **Discharge** and Discharge of Misery (`Discharge.cs`, `SkillHitPlan.cs`): per removable charge, Power adds
 lightning, Endurance fire and Frenzy cold base damage, plus the gem's more area per charge. A use spends the charges
@@ -4184,3 +4312,38 @@ The omitted-duration default 0x14015a9b0 is float positive infinity (0x7f800000)
 An integer 60000 was interpreted as a tiny subnormal float and immediately displayed 0:00.
 The regression independently decodes the BE duration bits and checks float 60, rather than comparing two calls
 to the same packet writer. Native icon was confirmed; corrected countdown awaits live verification.
+
+### Brands, Snipe and General's Cry (3.29.3c client findings)
+
+- **Brands (`ActiveSigil` buffs)**: `BuffDefinitions` rows `1218` (`conduit_sigil`), `1230` (`cataclysm_sigil`),
+  `1547` (`magma_sigil`), `1548` (`immolation_sigil`) and `1549` (`trigger_sigil`) use `ActiveSigil` ctor
+  `0x1415c6860` (`0x1415c68ee`, `0x1415c6a99`) and update `0x1415c6d60`, which read `buff+0x80` (`list`) entries
+  `[0]` (`MiscAnimated` row `4478..4482`) and `[1]` (`0 = fadein`, `1 = chargeup_start`) unchecked. Every `0x1c1`
+  for these buffs must include a 2-element `list`; omitting it dereferences null. `1551` (`magma_pustule`,
+  `PenanceBrandCharge`) requires the maximum energy (20) in `list[0]` when updating the effect in 3.29.3d.
+  HUD counters read `SigilDisplay` stats
+  (`current_number_of_active_*_sigils`, `current_number_of_inactive_*_sigils`, `current_total_number_of_sigils`).
+- **Snipe**: `BuffDefinitions` `1494` (`snipe_stacks`, `ShowCount`, `BuffVisuals` `1285` `snipe_stages`) displays
+  channelled stages; unlinked releases fire `Metadata/Projectiles/ChannelledSnipeDefaultProjectile`.
+- **General's Cry Mirage Warriors**: `Metadata/Monsters/MirageWarrior/MirageWarrior<Class>` (rows `8411..8417`)
+  serialize with `NonBlocking` `Positioned` flags (`flags1 = 0x0a`, trailing `1` → `+0x1e6` bit `0x40`, matching
+  `PetObject`) so the client never blocks player movement on the warrior's cell, and render via `BuffDefinitions`
+  `1748` with `BuffVisuals` `1215` (`mirage_warrior_visual`).
+
+### Channel release, action updates and combat deltas (3.29.3c client findings)
+
+- **Channel end (`S→C 0x1ae`) and Divine Ire (`0x233f`)**: `0x141fe4740` ends held channels for predictive players,
+  lockstep players, totems and channelled monster actions. Divine Ire release (`0x141d292d0` / `0x141d2a0c0`) reads
+  live actor stat `0x233f` (`divine_tempest_current_number_of_stages`) and skips the beam when zero.
+- **Flame Dash segment (`S→C 0x2c8`)**: `InstanceClientActionUpdate` (`0x141fe54d0`, Actor dispatch `0x14219be04`)
+  carries `(u16 actionTypeHash, u16 skillId, u16 actionSequence, u8 detachId, blob16)`. Flame Dash's slot `+0x300`
+  reader (`0x141478930` → `0x1414786c0` → `0x142196f20`) takes 20 LE bytes `(i32 x1, i32 y1, i32 x2, i32 y2, f32 duration)`.
+- **Component updates (`S→C 0x2bc`)**: Shrine slot 20 (`0x1415e49f0`, index `7`) reads the creation layout
+  (`0x141e3e0c0`, bit 7 claimed flag + `Shrines.dat` row) plus `u32 LE` taker object id; `GroundEffect` slot 20
+  (`0x141e1ea90` → `0x141e1ead0`, index `2`) reads `(u8 state, f32 LE remainingSeconds)` (`<= 0` triggers `EndEffect`);
+  `Beam` slot 20 (`0x1416710c0`, index `4`) shares the creation layout.
+- **Combat/action deltas**: `S→C 0x00c6` (`0x141f99010`: `u32 itemId, u32 charges`), `S→C 0x0174` (`0x141f99e10`:
+  `u32 inventoryId, u32 itemId, u8 result`, companion to `C→S 0x0057`), `S→C 0x00bb` (`0x1421a9480`: 1B `FreezeActions`
+  bitfield), `S→C 0x00bc` (`0x1421a95d0`: `u8 active`, optional `u8 durationSeconds`), `S→C 0x01c9` (`0x1421afa00`:
+  `u32 entityId, u16 soundEffectRow, u16 param`), `S→C 0x01ca` (`0x1421afcc0`: `MiscObjectSpawn`) and `S→C 0x02d9`
+  (`0x1421b8d30`, table `0x1435e6c78`: `EntityVariantDelta` with raw LE tagged variants).

@@ -63,7 +63,6 @@ sealed class Act10 : Act
             {
                 On.Npc(CathedralRooftop, Act10Objects.BannonRooftop, null, transitionedBy: "a10q1-RescuedBannon"),
                 On.Near(CathedralRooftop, Act10Objects.BannonRooftop, "a10q1-SeenBannon"),
-                On.SpawnsNear(CathedralRooftop, Act10Objects.PlaguewingSpawner, Act10Monsters.Plaguewing, until: "a10q1-RescuedBannon"),
                 On.Seen(CathedralRooftop, Act10Monsters.Plaguewing, "a10q1-SeenBoss"),
                 On.Killed(CathedralRooftop, Act10Monsters.Plaguewing, "a10q1-RescuedBannon"),
             },
@@ -78,7 +77,7 @@ sealed class Act10 : Act
                 On.Killed(DesecratedChambers, Act10Monsters.Avarius, "a10q2-KilledBoss", Act10Objects.ShortcutOpen),
                 new DisabledTeleportRule(DesecratedChambers, Act10Objects.ShortcutOpen),
                 On.Drops(DesecratedChambers, Act10Monsters.Avarius, Act10Items.AvariusStaff),
-                On.Npc(OriathDocks, Act10Objects.BannonTown, "a10q2-BannonTransformed"),
+                On.Npc(OriathDocks, Act10Objects.BannonTown, "a10q2-BannonTransformed", shownBy: "a10q1-RescuedBannon"),
                 On.Npc(OriathDocks, Act10Objects.InnocenceTown, null, transitionedBy: "a10q2-BannonTransformed", shownBy: "a10q2-BannonTransformed"),
             },
             // a10q3 "An End to Hunger" (act10.md a10q3): the horns are seen (a10q3-SeenGate); Innocence in The Ravaged
@@ -90,7 +89,7 @@ sealed class Act10 : Act
             // is QuestStaticRewards 39 (another −30% to elemental and chaos resistances: Game ResistancePenalty), the
             // Epilogue's gate (Karui Shores' and Oriath's EndQuestFlags) and the condition of Lilly's 1433 and Lani's
             // 1415/1416; every character is given it for the Atlas, but until earned here it is sent only in a hideout
-            // and the maps (Quests.EndgameOnly, ClientState.UnearnedQuestFlags). Sin's portal back to the docks
+            // and the maps (Quests.EndgameOnly, Player.UnearnedQuestFlags). Sin's portal back to the docks
             // (EpiloguePortal, kitava.arm) opens with the fight's end: in the real game the post-fight Sin's 1942 opens
             // it, a monster with an NPC component that is not created, so it opens with EndGameAvailable. Lani's
             // "Kitava Reward" (offer 66, Oriath Docks 1416 or Karui Shores 1498) is a book of two passive points (QSR
@@ -105,7 +104,6 @@ sealed class Act10 : Act
                 On.Npc(FeedingTrough, Act10Objects.SinTrough, null, transitionedBy: "SinPreKitavaTalk"),
                 On.Npc(FeedingTrough, Act10Objects.InnocenceTrough, null, transitionedBy: "SinPreKitavaTalk"),
                 On.Seen(FeedingTrough, Act10Monsters.Kitava, "a10q3-SeenBoss"),
-                On.Threshold(FeedingTrough, Act10Monsters.Kitava, 1, EndGameAvailable),
                 On.Portal(FeedingTrough, Act10Objects.EpiloguePortal, OriathDocks, Act10Objects.EpiloguePortal),
                 On.Exit(FeedingTrough, OriathDocks, EndGameAvailable),
             },

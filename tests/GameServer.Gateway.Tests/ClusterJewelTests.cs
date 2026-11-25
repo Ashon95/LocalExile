@@ -47,18 +47,18 @@ public class ClusterJewelTests
         Assert.DoesNotContain("AfflictionNotablePrismaticHeart__", rolls.Pool(large, plain).Select(p => p.Mod.Id));
 
         // A small passive grants the theme's own stats and what the jewel's "also grant" adds.
-        var conn = new ClientState(new(1, "cluster", 100, 100, 100, 100, null, []), 1, 1);
+        var player = new Player(new(1, "cluster", 100, 100, 100, 100, null, []), 1, 1);
         InventoryItem[] placed = [new(11, 20, 0, jewel)];
         var layout = ClusterJewelLayout.For(20, jewel)!;
         int small = layout.ByOffset.First(p => p.Value == ClusterJewelLayout.Kind.Small).Key;
-        conn.ClusterPassives.Add((ushort)(layout.Base + small));
-        var granted = ClusterJewelStats.For(conn, placed, items.Mods, Program.Stats).ToDictionary(s => s.Key, s => s.Value);
-        Assert.Equal(12, granted[Program.Stats.Key("fire_damage_+%")!.Value]);
-        Assert.Equal(7, granted[Program.Stats.Key("base_maximum_life")!.Value]);
+        player.Character.ClusterPassives.Add((ushort)(layout.Base + small));
+        var granted = ClusterJewelStats.For(player, placed, items.Mods, Program.Stats).ToDictionary(s => s.Key, s => s.Value);
+        Assert.Equal(12, granted[Stat.FireDamagePlusPct]);
+        Assert.Equal(7, granted[Stat.BaseMaximumLife]);
         // A jewel from before the server wrote themes names none: only its "also grant" counts, as it did.
         InventoryItem[] old = [new(12, 20, 0, plain with { Mods = [.. plain.Mods, new ItemMod(ModSection.Enchant, items.Mods.ById("AfflictionJewelSmallPassivesGrantLife_")!.Hash, [3])] })];
-        var before = Assert.Single(ClusterJewelStats.For(conn, old, items.Mods, Program.Stats));
-        Assert.Equal((Program.Stats.Key("base_maximum_life")!.Value, 3), before);
+        var before = Assert.Single(ClusterJewelStats.For(player, old, items.Mods, Program.Stats));
+        Assert.Equal((Stat.BaseMaximumLife, 3), before);
 
         // What a tool composes: a jewel that does not say its passives keeps a new one's enchantments; one that does is
         // taken as given. A unique has its own lists.
@@ -70,5 +70,38 @@ public class ClusterJewelTests
         var given = ItemCrafter.Build(items, rolls, $$"""{"base":"{{large.Id}}","mods":[{"id":"JewelExpansionPassiveNodes","section":"enchant","values":[13,10]}]}""", 84, new Random(4), out _)!;
         Assert.Equal((fire, 10, 1), (ClusterJewels.ThemeOf(large, given), Game.ClusterNodeBudget(given), given.Mods.Count));
         Assert.DoesNotContain(new UniqueCatalog(items).Create("Megalomaniac", new Random(202))!.Mods, m => m.Section == ModSection.Enchant);
+    }
+
+    [Fact]
+    public void Allocated_cluster_nodes_use_the_native_cast_speed_stat_and_notable_row()
+    {
+        var items = Program.Items;
+        var type = items.Find("Large Cluster Jewel")!;
+        var theme = ClusterJewels.FindTheme(type.Cluster!, "Fire Damage")!;
+        var jewel = ClusterJewels.Create(type, theme, 8, 2,
+        [
+            items.Mods.ById("AfflictionJewelSmallPassivesGrantCastSpeed")!,
+            items.Mods.ById("AfflictionNotableDoryanisLesson_")!,
+        ])!;
+        var player = new Player(new(1, "cluster", 100, 100, 100, 100, null, []), 1, 1);
+        InventoryItem[] placed = [new(11, 20, 0, jewel)];
+        var layout = ClusterJewelLayout.For(20, jewel)!;
+        uint castSpeedAffix = Stat.LocalAfflictionJewelSmallNodesGrantBaseCastSpeedPlusPct;
+        int castSpeed = Assert.Single(ClusterJewelStats.Entries(jewel), s => s.Stat == castSpeedAffix).Value;
+        Assert.True(castSpeed > 0);
+
+        Assert.Empty(ClusterJewelStats.For(player, placed, items.Mods, Program.Stats));
+        foreach (var (offset, _) in layout.ByOffset.Where(p => p.Value == ClusterJewelLayout.Kind.Small).Take(2))
+            player.Character.ClusterPassives.Add((ushort)(layout.Base + offset));
+        var fromSmalls = ClusterJewelStats.For(player, placed, items.Mods, Program.Stats).ToArray();
+        Assert.Equal(2 * castSpeed, fromSmalls.Where(s => s.Key == Stat.BaseCastSpeedPlusPct).Sum(s => s.Value));
+
+        player.Character.ClusterPassives.Clear();
+        int notable = Assert.Single(layout.NotableOrders).Key;
+        player.Character.ClusterPassives.Add((ushort)(layout.Base + notable));
+        var expected = Program.Passives.FindById("affliction_notable_doryani's_lesson")!.Stats;
+        var fromNotable = ClusterJewelStats.For(player, placed, items.Mods, Program.Stats).ToArray();
+        Assert.NotEmpty(expected);
+        Assert.Equal(expected, fromNotable);
     }
 }
