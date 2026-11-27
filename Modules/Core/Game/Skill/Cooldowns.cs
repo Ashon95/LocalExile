@@ -83,7 +83,7 @@ public static partial class Game
                 scoped += (long)perMine * Math.Max(0, playerStats.GetValueOrDefault(Stat.NumberOfMinesDetonatedRecently));
         }
         else trapUses = 0;
-        if (skills.EffectId(effect) is "BlinkArrow" or "BlinkArrowAltX" or "BlinkArrowAltY"
+        if (skills.EffectId(effect) is "BlinkArrow" or "BlinkArrowAltX" or "BlinkArrowAltY" or "BlinkArrowRoyale"
                 or "MirrorArrow" or "MirrorArrowAltX" or "MirrorArrowAltY")
             scoped += Bonus(Stat.BlinkAndMirrorArrowCooldownSpeedPlusPct);
         if (Bonus(Stat.PactCooldownSpeedPlusPct) is long pact and not 0 && skills.HasType(effect, "Pact"))
@@ -434,6 +434,7 @@ public static partial class Game
     // Whether a use of the skill pays its cost when it starts (CastGemSkill's PayMana), not a link's or a toggle's.
     static bool PaysOnUse(Player player, ushort skillId, int effect) =>
         !IsLinkSkill(player, effect) && BannerAuraRow(SkillsFor(player).EffectId(effect)) == 0
+        && CooldownTriggerController(SkillsFor(player).EffectId(effect)) == 0
         && ToggledReservation(player, skillId) is null;
 
     // The charge a skill spends to be used while it cools down (CooldownBypass), null when it has no bypass.

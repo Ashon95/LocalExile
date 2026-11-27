@@ -478,6 +478,8 @@ public static partial class Game
             // this value for Groundbreaking's shorter range and its unskipped startup (0x1412fafd0 / 0x1419fda80).
             // StaticStrikeNew selects Gathering Lightning's beam at melee contact with variation 1 (0x141b16580).
             string? effectId = skills.EffectId(effect);
+            if (CooldownTriggerController(effectId) != 0)
+                stats[Stat.MetaSkillLinkedSkillCount] = CooldownTriggerLinkedCount(player, id, effect);
             if (effectId == TrarthusBlastRain)
                 stats[Stat.SkillBehaviourVariation] = skills.BehaviourVariation(effect);
             bool gatheringLightning = IsGatheringLightning(effect);
@@ -485,11 +487,16 @@ public static partial class Game
             if (IsLeapSlam(player, effect) || gatheringLightning || skills.ActionHash(effect) is HolyHammersAction or EarthshatterFissures.Action
                 || effectId is "VolcanicFissureAltX" or "SparkAltY" or "BallLightningAltX"
                 || IsTrarthusChainHook(effectId) || IsRainOfArrowsVariant(effectId) || IsStormRain(effectId)
-                || IsChargedDash(player, effect) || IsIceSpear(effectId) || IsWaveOfConviction(effectId))
+                || IsChargedDash(player, effect) || IsIceSpear(effectId) || IsWaveOfConviction(effectId) || IsSpectralHelix(effectId))
                 stats[Stat.SkillBehaviourVariation] = skills.BehaviourVariation(effect);
             if (LacerateEffect(effectId))
             {
                 stats[Stat.SkillBehaviourVariation] = skills.BehaviourVariation(effect);
+                stats[Stat.InSandStance] = player.Stance == StanceCatalog.SandSelection ? 1 : 0;
+            }
+            else if (IsBladestorm(effectId))
+            {
+                // Bladestorm's native action (0x141b5ea30) reads in_sand_stance directly from the skill stats to pick Sand vs Blood spin visuals.
                 stats[Stat.InSandStance] = player.Stance == StanceCatalog.SandSelection ? 1 : 0;
             }
             bool perforate = skills.ActionHash(effect) == PerforateAction;
@@ -501,6 +508,10 @@ public static partial class Game
             if (Stat.BaseSkillEffectDuration is var baseDurationKey && own.GetValueOrDefault(baseDurationKey) > 0
                 && Stat.SkillEffectDuration is var durationKey)
                 stats[durationKey] = (int)Math.Round(1000 * SkillDurationModifiers.Seconds(own[baseDurationKey],
+                    name => playerStats.GetValueOrDefault(name),
+                    name => own.GetValueOrDefault(name), DurationKinds(player, effect)));
+            if (TraumaBaseDurationMs(own) is int traumaBaseMs and > 0)
+                stats[Stat.TraumaDurationMs] = (int)Math.Round(1000 * SkillDurationModifiers.Seconds(traumaBaseMs,
                     name => playerStats.GetValueOrDefault(name),
                     name => own.GetValueOrDefault(name), DurationKinds(player, effect)));
             // Devout of Lunaris: the client aims a self-targeted Nova at the cursor only on
@@ -808,6 +819,7 @@ public static partial class Game
                 && own.GetValueOrDefault(Stat.TriggeredByCrystalfallSupport) == 0
                 && own.GetValueOrDefault(Stat.TriggeredByInfernalCry) == 0
                 && own.GetValueOrDefault(Stat.TriggeredByShockwaveSupport) == 0
+                && own.GetValueOrDefault(Stat.TriggeredByPyreSupport) == 0
                 && supported.WornGrant is not { EffectId: GoreShockwaveEffect }
                 && own.GetValueOrDefault(Stat.TriggeredByDivineCry) == 0
                 && own.GetValueOrDefault(Stat.TriggeredPrismaticBurst) == 0 && TriggerOnlyReason(supported) is not null)
@@ -830,8 +842,10 @@ public static partial class Game
             if (SkillsFor(player).EffectId(effect) == "BallLightningAltX")
                 stats[Stat.ProjectileSpeedPlusPct] = OrbitingBallLightningSpeedPercent(playerStats.GetValueOrDefault, OwnPanel);
             ApplyProjectilePanelStats(effect, stats);
-            // Network skill records need the final fall speed used by the expanding and linear rain actions.
-            if (IsRainOfArrowsVariant(effectId) || effectId is TrarthusBlastRain or ConflagrationEffect || IsStormRain(effectId))
+            // These native actions read the derived fall speed directly from the network skill record.
+            var summon = SummonData.Find(effectId);
+            if (IsRainOfArrowsVariant(effectId) || effectId is TrarthusBlastRain or ConflagrationEffect
+                || IsStormRain(effectId) || summon is { Family: "Clone" })
                 stats[Stat.ArrowRainFallSpeedPlusPct] = RainOfArrowsFallSpeed(player, id, characterInputs, supported.Stats);
             if (effectId == ConflagrationEffect)
                 stats[Stat.TotalNumberOfArrowsToFire] = ConflagrationArrowCount(stats.GetValueOrDefault);
@@ -894,7 +908,7 @@ public static partial class Game
             if (Get(Stat.BladefallBaseVolleyFrequencyMs) is int volleyMs and > 0)
                 Publish(Stat.BladefallVolleyFrequencyMs, BladefallVolleys.FrequencyMs(volleyMs,
                     Get(Stat.BladefallVolleyFrequencyPlusPctPer100MaximumMana), player.Pools.Mana));
-            if (SummonData.Find(SkillsFor(player).EffectId(effect)) is { LimitStat: > 0 } summon)
+            if (summon is { LimitStat: > 0 })
             {
                 int limit = SummonLimit(player, summon, supported);
                 Publish(summon.FinalLimitStat, limit);
@@ -934,7 +948,7 @@ public static partial class Game
                 int frenzy = ChargesOf(player).Effective(ChargeType.Frenzy);
                 // Read the same additive inputs as placement, before final cast speed is projected into the skill stats.
                 int ThrowStat(uint key) => GolemStat(supported.Stats, key) + GolemStat(playerStats, key);
-                int throwSpeed = PlacedThrowIncrease(ThrowStat, placed.Mine, frenzy);
+                int throwSpeed = PlacedThrowIncrease(ThrowStat, placed.Mine, frenzy, PlacedWeaponThrowSpeed(player, ThrowStat, placed.Mine));
                 Publish(placed.Mine ? Stat.VirtualMineThrowingSpeedPlusPct : Stat.VirtualTrapThrowingSpeedPlusPct, throwSpeed);
                 if (Get(Stat.TrapTriggerRadiusPlusPct) is int triggerPct and not 0)
                     Publish(Stat.VirtualTrapTriggerRadiusPlusPct, triggerPct);
@@ -1420,6 +1434,8 @@ public static partial class Game
             && !CooldownTriggerExecutable(player, gem)
             && !SnipeTriggeredAttackExecutable(player, skillId, gem)
             && !ManaforgedAttackExecutable(player, skillId, gem)) return "this trigger payload has no server executor";
+        if (triggered && SkillsFor(player).EffectId(effect) == ThunderstormEffect)
+            return "Thunderstorm must be used directly";
         if (!triggered && TriggerOnlyReason(gem) is { } trigger) return trigger;
         if ((ActorSkillInstanceDisabled(player, effect, skillId) ?? WeaponRestricted(player, effect)
                 ?? GemRequirementsUnmet(player, gem.SourceGem)) is { } disabled)
@@ -1903,6 +1919,7 @@ public static partial class Game
             player.PetrifiedBlood.Suspend();
             CharacterSaves.SetPetrifiedBlood(CharacterName(player), false);
         }
+        ClearCooldownTriggersLocked(player, gone);
         double now = AreaTime(player);
         foreach (var fighter in player.Summons.Fighters.Values.Where(g => gone.Contains(g.Source)).ToArray())
             RemoveSummonLocked(player, fighter, now);

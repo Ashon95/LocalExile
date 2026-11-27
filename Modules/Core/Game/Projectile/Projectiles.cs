@@ -317,11 +317,22 @@ public static partial class Game
         /// <summary>Releases a resolved use at the runtime's current instant. Call in the area's frame.</summary>
         public long ReleaseNow(ProjectileUse use)
         {
+            if (use.Payload is ProjectileOffense { Fusillade: { } cast } shot)
+            {
+                QueueFusillade(use, shot, cast);
+                SacredWispsOnRelease(use);
+                return 0;
+            }
+            return ReleaseFlight(use, notifyWisps: true);
+        }
+
+        long ReleaseFlight(ProjectileUse use, bool notifyWisps)
+        {
             var seeded = use with { Seed = ++seed };
             long useId = Runtime.Release(seeded);
             if (seeded.Payload is ProjectileOffense { ForbiddenRite: { } rite } shot)
                 ReleaseForbiddenRite(seeded, shot, rite);
-            SacredWispsOnRelease(seeded);
+            if (notifyWisps) SacredWispsOnRelease(seeded);
             if (ServerTrace.Projectiles && !Quiet(seeded.Payload))
                 Console.WriteLine($"[gateway] {Player.Connection.Remote} projectile release t={Runtime.Now / (double)ProjectileRuntime.QuantaPerSecond:0.000000} use={useId} "
                     + $"skill={PayloadLabel(seeded.Payload)} metadata={seeded.Profile.Id} count={seeded.Profile.Count} "
@@ -348,7 +359,10 @@ public static partial class Game
             ClearCremationGeysers();
             ClearEnsnares();
             ClearElectrocutionArrows();
+            ClearVenomGyre();
             ClearStormRain();
+            ClearThunderstorms();
+            ClearFusillades();
             ClearConflagration();
             ClearExplosiveFuses();
             RetireBannerLocked(Player);
@@ -951,8 +965,15 @@ public static partial class Game
             if (shot.CompletedChainDamagePercent != 0)
                 chainsMore *= Math.Max(0, 1 + (double)shot.CompletedChainDamagePercent
                     * (contact.Projectile.Profile.Chain - contact.Projectile.ChainsRemaining) / 100);
+            // One stat build per contact: every input below reads the same owner state (about 120 µs per build).
+            var player = shot.ActualCaster ?? CharacterPlayerStats(Player);
+            bool exertedAttack = shot.DirectAttackContact && !shot.Mirage;
+            int shotExertWarcries = !exertedAttack ? 0 : (shot.IntimidatingCryExerted ? 1 : 0) + shot.OtherWarcryExertions + (shot.RallyingDamage.HasValue ? 1 : 0);
             double returnMore = contact.Phase > 0 ? shot.ReturnMultiplier : 1;
-            double ailmentMore = chainsMore * returnMore * ExertedAttackMore(shot.SkillStats, shot.IntimidatingCryExerted, shot.OtherWarcryExertions, shot.RallyingDamage);
+            double elementalMore = shot.DamageMorePerElementalAilment == 0 ? 1
+                : ElementalHitDamageMore(shot.DamageMorePerElementalAilment, ElementalHitAilmentsOn(target, at));
+            double ailmentMore = chainsMore * returnMore * elementalMore * (!exertedAttack ? 1
+                : ExertedAttackMore(shot.SkillStats, shot.IntimidatingCryExerted, shot.OtherWarcryExertions, shot.RallyingDamage, player));
             if (ailmentMore != 1)
                 shot = shot with
                 {
@@ -962,7 +983,9 @@ public static partial class Game
                 };
             if (shot.DamageMorePerGroundBounce != 0 && contact.Projectile.GroundBounces > 0)
                 shot = shot.ScaleDamage(Math.Max(0, 1 + shot.DamageMorePerGroundBounce * (double)contact.Projectile.GroundBounces / 100));
-            double more = contact.Multiplier * (contact.Phase > 0 ? shot.ReturnMultiplier : 1);
+            if (shot.DamageMoreAfterPierce != 0 && contact.Projectile.EnemiesPierced > 0)
+                shot = shot.ScaleDamage(Math.Max(0, 1 + shot.DamageMoreAfterPierce / 100d));
+            double more = contact.Multiplier * returnMore * elementalMore;
             if (ReferenceEquals(shot.BrandedTarget, target))
                 more *= Math.Max(0, 1 + GolemStat(shot.SkillStats, Stat.TriggerBrandSupportHitDamagePlusPctFinalVsBrandedEnemy) / 100.0);
             if (!shot.Spell && shot.FarShot) more *= WardBreakEffects.FarShot(contact.Projectile.Distance);
@@ -970,18 +993,18 @@ public static partial class Game
             if (shot.ShatteringSteelAmmoHitBonus > 0)
                 more *= 1 + shot.ShatteringSteelAmmoHitBonus * Math.Clamp((70 - contact.Projectile.Distance) / 60, 0, 1);
             var baseHit = contact.IsArea ? shot.AreaHit ?? shot.Hit : shot.Hit;
-            // One stat build per contact: every input below reads the same owner state (about 120 µs per build).
-            var player = shot.ActualCaster ?? CharacterPlayerStats(Player);
             var packet = new SkillDamageContext(shot.Spell ? SkillHitKind.Spell : SkillHitKind.Attack, player).Hit(baseHit).Scale(more * chainsMore);
             var hitRolls = HitRollsFor(player);
-            var damageRoll = WithIntimidatingCryExert((hitRolls with { DamageMorePct = 0 })
+            var damageRoll = WithExertedAttackRollModifiers((hitRolls with { DamageMorePct = 0 })
                 .ForSkill(name => name is var k ? shot.SkillStats.GetValueOrDefault(k) : 0, shot.Spell,
-                    finalRepeat: contact.Projectile.Use.RepeatsLeft == 0), shot.IntimidatingCryExerted).ForWeapon(shot.WeaponLocal);
+                    finalRepeat: contact.Projectile.Use.RepeatsLeft == 0), shot.IntimidatingCryExerted,
+                shotExertWarcries, player, shot.SkillStats).ForWeapon(shot.WeaponLocal);
             long criticalDoubleDamage = HitRollModifiers.CriticalDoubleDamageOf(player, shot.SkillStats);
             var rolled = WithConditionalSupportDamageLocked(Player, shot.SkillStats, !shot.Spell, target,
                 GameEvents.WithOutgoingDamage(Player, player, target,
                     damageRoll.RollBeforeCritical(packet, random, criticalDoubleDamage)), at);
-            rolled = WithExertedAttackDamage(rolled, shot.SkillStats, shot.IntimidatingCryExerted, shot.OtherWarcryExertions, shot.RallyingDamage);
+            if (exertedAttack)
+                rolled = WithExertedAttackDamage(rolled, shot.SkillStats, shot.IntimidatingCryExerted, shot.OtherWarcryExertions, shot.RallyingDamage, player);
             bool secondForm = contact.Projectile.Form > 0;
             var formCrit = secondForm ? shot.SecondFormOptions : null;
             int chance = secondForm && shot.SecondFormCriticalChance is int second
@@ -1036,7 +1059,7 @@ public static partial class Game
                 allyAt: shot.ActualCaster is null && !shot.FromTrapOrMine && !shot.Mirage ? null : ((int)contact.Projectile.Use.Origin.X, (int)contact.Projectile.Use.Origin.Y),
                 cull: Cull.Of(player, shot.SkillStats, critical, shot.Spell).WithWeapon(weaponLocal),
                 cullPlayer: null, chaosDamage: chaosDamage,
-                preventsShellBreak: shot.PreventsSomaticShellBreak, ownHit: ownHit && !immune);
+                bypassesShell: shot.BypassesSomaticShell, ownHit: ownHit && !immune);
             if (hit is null) return ProjectileHitResult.Miss;
             if (shot.FromTotem && !immune) LeechFromTotemHitLocked(Player, target, directDamage, at, player);
             if (!immune) steel?.Targets.Add(contact.Target);
@@ -1126,6 +1149,9 @@ public static partial class Game
                     target: !shot.FromTrapOrMine && !shot.FromTotem ? target : null);
             if (shot.ActualCaster is null) ChargesOnHit(Player, target, critical, shot.Spell, shot.Effect, shot.Level, shot.Quality, melee: false,
                 primary: shot.FirstHit?.Claim() ?? true, skillStats: shot.SkillStats);
+            if (shot.ActualCaster is null && !shot.FromTotem && !shot.FromTrapOrMine
+                && shot.Trauma is { Gained: false } trauma && shot.TraumaSource is { } traumaSource)
+                TryGainTraumaLocked(Player, this, traumaSource, trauma, at, "Trauma");
             CommitProjectileHit(this, contact, target, hit.Value, damage, shot, critical,
                 OwnerStun(Player, shot.Effect, target, damage, mitigated, melee: false, shot.Spell, critical, player, shot.SkillStats, lifeBefore,
                     localStunReduction: shot.LocalStunThresholdReduction, weaponClass: shot.WeaponClass));
@@ -1163,6 +1189,8 @@ public static partial class Game
                 ExplosiveArrowAtEnd(value);
                 EnsnaringArrowAtEnd(value);
                 ElectrocutionAtEnd(value);
+                if (value.Reason == ProjectileEndReason.Returned && p.Use.Payload is ProjectileOffense { VenomGyre: { } caught })
+                    CatchVenomGyre(p.Use, caught);
                 if (value.Reason == ProjectileEndReason.Landing && p.Use.Payload is ProjectileOffense { Unearth: { } corpse })
                     LandUnearth(corpse, (x, y));
             }
@@ -1333,7 +1361,7 @@ public static partial class Game
             }
         }
 
-        void Effect(int x, int y, string ao, long lifetime, double? radius = null, (string Ao, string Bone)? attach = null,
+        void Effect(int x, int y, string ao, long? lifetime, double? radius = null, (string Ao, string Bone)? attach = null,
             uint attachParent = 0, byte animatedFlags = 0, byte positionedFlags0 = 0, uint animationWord = 0,
             float animationValue = 0, uint animatedId = 0, int? artRadius = null, (uint Clip, long Length)? endClip = null,
             float rotation = 0, uint? startClip = null, (uint Clip, long After)? thenClip = null, Action<Action>? captureRemoval = null,
@@ -1363,14 +1391,17 @@ public static partial class Game
                 visual.Created = true;
                 return InstanceEntities.CreateObject(id, InstanceEntities.ObjectTypeHash(EffectObject.TypePath), effect.Blob());
             }, wake: true);
-            if (thenClip is { } next && next.After < lifetime)
+            if (thenClip is { } next && (lifetime is null || next.After < lifetime))
                 Runtime.Schedule(Runtime.Now + next.After, () => WorldRecords(id, () => visual.Created && !visual.Ended
                     ? [InstanceProtocol.AnimationUpdate(id, 0, next.Clip, 1)] : null));
             // endClip: a clip the art plays when its time is up (a ground's fade-out); the object goes after it.
-            if (endClip is { } ending)
-                Runtime.Schedule(Runtime.Now + lifetime, () => WorldRecords(id, () => visual.Created && !visual.Ended
-                    ? [InstanceProtocol.AnimationUpdate(id, 0, ending.Clip, 1)] : null));
-            Runtime.Schedule(Runtime.Now + lifetime + (endClip?.Length ?? 0), Remove);
+            if (lifetime is { } duration)
+            {
+                if (endClip is { } ending)
+                    Runtime.Schedule(Runtime.Now + duration, () => WorldRecords(id, () => visual.Created && !visual.Ended
+                        ? [InstanceProtocol.AnimationUpdate(id, 0, ending.Clip, 1)] : null));
+                Runtime.Schedule(Runtime.Now + duration + (endClip?.Length ?? 0), Remove);
+            }
             captureRemoval?.Invoke(Remove);
             captureMovement?.Invoke((toX, toY, seconds) => World(id, () => visual.Created && !visual.Ended
                 ? InstanceProtocol.MoveTo(id, toX, toY, seconds, InstanceProtocol.FollowTerrain) : null));
@@ -1384,7 +1415,7 @@ public static partial class Game
                     return visual.Created ? [InstanceProtocol.RemoveObject(id)] : null;
                 }, remove: true);
             }
-            if (attach is not { } child) return;
+            if (attach is not { } child || lifetime is not { } childLifetime) return;
             // The art attached to the effect's bone: the client carries it along with the parent's animation.
             uint childId = Player.TakeObjectId();
             // The official split-arrow art sends kind 0 and mask 3 (the base record of the Animated component), which
@@ -1400,7 +1431,7 @@ public static partial class Game
                 return InstanceEntities.CreateObject(childId, InstanceEntities.ObjectTypeHash(EffectObject.TypePath), childEffect.Blob());
             });
             World(childId, () => childVisual.Created ? InstanceProtocol.EnterWakeZone(childId) : null);
-            Runtime.Schedule(Runtime.Now + lifetime, () =>
+            Runtime.Schedule(Runtime.Now + childLifetime, () =>
             {
                 childVisual.Ended = true;
                 WorldRecords(childId, () =>

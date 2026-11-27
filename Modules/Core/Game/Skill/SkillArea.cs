@@ -28,7 +28,7 @@ public static class SkillArea
             : Game.LacerateEffect(effect) ? LacerateWaves.BaseRadius
             : Game.CleaveAttack(effect) ? Game.CleaveBaseRadius
             : Game.IsBladestorm(effect) ? 24
-            : effect is "TectonicSlam" or "VaalBladeVortex" ? 15
+            : effect is "TectonicSlam" or "VaalBladeVortex" or Game.SpectrumHitEffect ? 15
             : effect == "PrismaticBurst" ? 13
             : GatewayProjectileSkillProfiles.IsShatteringSteel(effect) ? 28
             : effect is "FireTrap" or "VaalFireTrap" ? 16 : effect == "StormblastMine" ? 20 : effect is "DarkPact" or "DarkPactAltX" or "DarkPactRoyale" ? 26
@@ -102,6 +102,8 @@ public static class SkillArea
         foreach (uint more in SupportMoreArea) mod *= Math.Max(0, 1 + get(more) / 100.0);
         if (get(Stat.IsTotem) != 0)
             mod *= Math.Max(0, 1 + get(Stat.StygianSpireTotemAreaOfEffectPlusPctFinalPerMaximumTotem) / 100.0);
+        if (get(Stat.AffectedBySandstorm) != 0)
+            mod *= Math.Max(0, 1 + get(Stat.BladestormAreaOfEffectPlusPctFinalWhileInSandstorm) / 100.0);
         // Discharge: more area per removable charge it will spend (the charges above the minimum).
         if (get(MorePerRemovableCharge) is int perCharge and not 0)
             mod *= Math.Max(0, 1 + perCharge * Charges.Types.Sum(t => Math.Max(0, get(Stat.Of($"current_removable_{Charges.Name(t)}_charges")))) / 100.0);
