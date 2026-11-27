@@ -66,6 +66,10 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Spells are released at the cast animation's contact keyframe. Docs: [11](../docs/protocol/11-skills.md) Â§9.
 - Pride on enemies. Docs: [11](../docs/protocol/11-skills.md) Â§12.
 
+- Bladestorm swings around the player and creates timed Blood or Sand storms with their respective buffs.
+- Chain Hook pulls and hits at beam contact at range, and uses the weapon stance's swing at close range.
+- Chain Hook of Trarthus attaches, grants Rage on attack hits and deals area damage when a chain breaks.
+
 ## Partly working
 
 - Vaal Immortal Call protects the last point of Life from on-kill Life loss while active.
@@ -84,6 +88,7 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Mark Mastery blinds around the live marked enemy in offline tests, using the server's 35-cell nearby blind reach.
 - Weapon-local Bloodseeker instant Life leech, Elder life gained against blinded enemies and culling against bleeding
   enemies, and Nametaker critical multiplier and instant leech follow the hand that makes the hit.
+- Replica Innsbury Edge supplies its local Withered chance to accepted weapon hits on the server. Live checks pending.
 - Weapon-conditioned attack damage, bow bleeding, attack ignite and spell poison read their qualifying stats.
   Trap and mine damage, Battlemage, Perseverance, physical reduction bypass and elemental ailment swaps apply offline.
 - Acrobatics, The Agnostic, Imbalanced Guard, Wicked Ward, Corrupted Soul and Transcendence resolve their defences.
@@ -126,7 +131,8 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Essence Drain: a surviving hit leaves a chaos damage over time that recovers life for its caster, and
   Contagion's spread carries it. Desperation drains the caster's Life and Energy Shield while its debuff deals damage.
   The debuff icon and Survivors support remain open.
-- Ice Shot: its primary arrows (`IceArrow`) hit; the cone splash is open.
+- Ice Shot damages enemies in a cone behind the impact. Ice Shot of Penetration applies two sideways cones.
+- Lightning Arrow of Electrocution applies its timed strikes to the enemy where the arrow stops.
   Docs: [11](../docs/protocol/11-skills.md) Â§10.
 - Dual Strike applies its full-life damage and critical chance to each target at contact.
 - Multi-strike skills (Double Strike): each strike is its own hit, sharing one critical roll. Either Impaling strike
@@ -199,6 +205,17 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Vaal souls (#308), Vaal Ground Slam's radial wave, Vaal Fireball, Vaal Spark and Vaal Discipline (allied recharge).
   Docs: [27](../docs/protocol/27-vaal-souls.md),
   [Behemoth](../docs/game/behemoth.md).
+- Tectonic Slam uses a forward fissure with seeded branches.
+  Contacts advance along each branch and one use can contact each target once.
+- Sunder and its variants time their wave segments and victim shockwaves.
+  Earthbreaking keeps overlapping uses, and Trarthus can redirect at enemies and terrain.
+- Ice Crash lands in three timed circles with one contact per enemy.
+  Cadence uses the swinging hand's radius and requires two compatible weapons.
+- Consecrated Path and its Endurance variant select a target near the aim, land at contact, and create timed ground.
+- Earthshatter and both variants resolve travelling fissures and spikes triggered by slams, warcries or the timer.
+- Perforate resolves repeated Blood spikes and single-hit Sand rays.
+  Duality adds spikes for four seconds after a stance change.
+  Bloodshed always uses its slower, wider Blood sequence.
 - Ground Slam's forward wave scales with area and gains more damage near the player.
   Area attacks publish their final radius.
   Volcanic Fissure hits along its path and launches landing projectiles at the end.
@@ -220,6 +237,11 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Heavy Strike and Trarthus confirmed-hit particles/audio, with typed and critical melee feedback. Single-clip Heavy Strike stances use their ACT contact.
   Docs: [11](../docs/protocol/11-skills.md), "Hit effects".
 - Seismic, Ancestral, Infernal and Battlemage's Cry grant their timed buffs to the caster and nearby allies.
+- Infernal Cry exerts six melee attacks and triggers Combust on the first melee hit of each attack.
+- Infernal Cry marks enemies for a timed fire explosion that consumes their corpses on death.
+- Battlemage's Cry triggers one linked spell on each of five exerted attacks' first melee hits, with the spell's cost.
+- Shockwave supports spend a stored use on a melee hit, and Void Shockwave repeats from enemies hit by its first wave.
+- Limbsplit and The Cauteriser trigger their own Gore Shockwave on a melee hit with at least 150 Strength.
 - Poison hits and spread use increased Poison Duration. Viper Strike of the Mamba applies one poison per hit
   to a target with no active poisons. Unnatural Strength grants minions conversion and Wither on hit.
 - Intimidating Cry applies War Bringer's exertion count and carries the spent exertion
@@ -290,8 +312,13 @@ Part of [Status](../Status.md); what to build next in this area is in
   over time and burst; Concentrated Effect scaling and owner/proxy damage restrictions await a client check.
   The arrows fall before they land, and Toxic Rain's pods grow and burst, for every skill effect.
   The arrow the client flies up is stood in for by the falling art; Rain of Arrows and Blast Rain shoot nothing up.
+- Rain of Arrows of Artillery lands along the shot direction; Saturation lands in expanding pairs around the aim.
+- Blast Rain of Trarthus applies a burn on the single arrow's landing hit and on targets its forward fire wave reaches.
+- Storm Rain and its transfigured gems leave arrows that fire periodic area hits between their endpoints.
+- Conflagration leaves arrows that detonate near the caster, setting off adjacent arrows and applying a burning debuff.
 - Kinetic Rain variants land delayed area hits. See [projectile skills](../docs/game/projectile-skills.md).
-- Scourge Arrow variants plant pods and fire thorn volleys. See [projectile skills](../docs/game/projectile-skills.md).
+- Scourge Arrow and its Royale variant plant pods on release based on channel stages; Scourge Arrow of Menace plants
+  a pod per arrow. See [projectile skills](../docs/game/projectile-skills.md).
 - Somatic Shell absorbs damage and transfers on depletion. See [projectile skills](../docs/game/projectile-skills.md).
 - Caustic Arrow stops at the aimed point and leaves caustic ground: chaos damage over time that does not stack.
   The ground is the art's pieces laid over the radius, for the worn skill effect; the layout is the server's own.
@@ -315,16 +342,20 @@ Part of [Status](../Status.md); what to build next in this area is in
   Puncture always bleeds, for its skill duration and with its more bleeding damage.
   Power Siphon fires one projectile at each of the nearest enemies ahead, with its per-Power-Charge criticals.
 - Doomfletch's weapon physical gain reaches attacks as separate fire, cold and lightning damage.
-- Equipment modifiers scale from final attributes, Oskarm uses final Accuracy for attack critical chance, and
+- Equipment modifiers scale from final attributes, Oskarm uses final Accuracy for attack critical chance and
+  its item-local Assassin's Mark level for qualifying hits by the wearer, and
   Mask of the Stitched Demon uses full maximum Energy Shield for Life regeneration.
 - Blink Arrow and its variants leave clones at departure; clones use arrows, arrow rain or elemental shots.
   Lightning Warp queues teleports and hits both endpoints.
 - Instant skills, shared Blink and Guard cooldowns (a guard skill cast from the bar as well as one a trigger releases),
   opt-in warcry sharing and cost admission, Bladefall of Trarthus and both Frostblink hit and chill areas, with clear
-  landings across terrain gaps, monster-blocker landing slide, and same-frame `0x02bc` cooldown refreshes queued behind
-  `0x01ce` so predictive clients execute the blink (verified live). `Frostblink of Wintry Blast` (`FrostblinkAltX`)
-  teleports at cast contact with 32/42-cell IceDash clamping, hits both ends at 20 base radius without chilled ground,
-  scales hit damage per 5% target chill and removes chill on hit (verified live). A guard's bar entry is held at the
+  landings across terrain gaps, walk-only door crossing (prison grates via layer-1 sight barriers) while stopping before
+  solid walls and projectile-blocking doors with the 5-cell minimum displacement check, Flame Dash 25/60-cell sight-line
+  and fallback clamping, pre-cooldown admission, and burning-ground segment DoT, sight-aware movement landing fallback,
+  monster-blocker landing slide, and same-frame `0x02bc` cooldown refreshes queued behind `0x01ce` so predictive clients
+  execute the blink (verified live). `Frostblink of Wintry Blast` (`FrostblinkAltX`) teleports at cast contact with
+  32/42-cell IceDash clamping, hits both ends at 20 base radius without chilled ground, scales hit damage per 5% target
+  chill and removes chill on hit (verified live). A guard's bar entry is held at the
   skill's own cooldown with a zero recovery rate while its buff runs and counts at the character's recovery after it, as
   the official client shows. The held entry is published before the instant action so the client skips its press
   prediction, and a stat-only skill refresh (a guard or self buff starting/ending) no longer rebuilds the skill bar; a
@@ -343,9 +374,15 @@ Part of [Status](../Status.md); what to build next in this area is in
   enemies without moving its caster. Vaal Ancestral Warchief slams, leaps and grants its owner more melee damage
   while active. Offline checks cover the server's timing, damage and movement.
 - Steelskin, Immortal Call and Molten Shell cast by hand start the triggered guard buff; a running or recovering
-  guard refuses the next before its cost. Docs: [11](../docs/protocol/11-skills.md) Â§12.
+  guard refuses the next before its cost. Immortal Call also sends its cast art, whose sound events are the
+  activation sound an instant skill's own 0x1ce does not play. Docs: [11](../docs/protocol/11-skills.md) §12.
 - Phase Run: movement speed and Phasing for its duration, longer per Frenzy Charge consumed; the next skill use
   swaps it for its more melee physical damage (not checked live). Docs: [11](../docs/protocol/11-skills.md) Â§12.
+- Crushing Fist, Glacial Shield Swipe, Swordstorm, Eviscerate and Shield of Light open a use window on block.
+  Swordstorm deals eight timed dual-weapon hits. Glacial Shield Swipe advances a forward cone.
+  Eviscerate advances two waves that can each hit a target.
+  Shield of Light sends a forward cone and waves from nearby allies in tile entry order on its first contact.
+  Crushing Fist fixes its ground position on the first animation contact and hits on the following slam contact.
 - Bloodscent applies its Rage grant to the weapon that landed the hit (checked offline).
 - Blood Rage: attack speed, physical attack life leech, Frenzy Charge chance on kill and its physical degeneration;
   a kill refreshes it (not checked live). Docs: [11](../docs/protocol/11-skills.md) Â§12.
@@ -417,6 +454,7 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Totems: Rejuvenation, Arc, projectile spells, supported summons, ballistas, Shockwave, Devouring and Decoy Totem
   (ordinary monster AI), with totem limit, range, duration and Lockstep placement timing. Eligible placements can summon
   two totems. Skill bars without a saved attack-in-place mask use each bound skill's default.
+- Shockwave Totem of Authority centres each nova on its owner's position when the cast releases.
   A lockstep non-spell totem placement's hold takes the client's own Move, as GGG's servers do.
   two totems.
   A Focused Ballista totem fires only when due with an owner attack it has not spent.
@@ -429,7 +467,7 @@ Part of [Status](../Status.md); what to build next in this area is in
   ground effects.
   Docs: [11](../docs/protocol/11-skills.md) Â§10g.
 - Passive self buffs. Docs: [11](../docs/protocol/11-skills.md) Â§12.
-- World effect rules drive Onslaught and basic percentage-based charge gains on kill and their shield, dual-wield, frozen-enemy and poison-count variants, item-granted marks on hit and Svalinn's socketed spell on block. Player and hostile monster skill hits share the Frenzy and Power charge rules. The separate Power-on-hit roll is player-only. Ice Bite uses the same frozen-kill rule for a player and a supported minion; the killer gains the Frenzy Charge.
+- [World effect rules](../docs/dev/combat-effect-rules.md) drive Onslaught and basic percentage-based charge gains on kill and their shield, dual-wield, frozen-enemy and poison-count variants, item-granted marks on hit and Svalinn's socketed spell on block. Player and hostile monster skill hits share the Frenzy and Power charge rules. The separate Power-on-hit roll is player-only. Ice Bite uses the same frozen-kill rule for a player and a supported minion; the killer gains the Frenzy Charge.
 - Onslaught on kill and from a Silver Flask. Docs: [13](../docs/protocol/13-items.md) Â§8a.
 - Rampage and Soul Eater from item stats, with Soul Ascension's souls from hits on rare and unique enemies.
   Docs: [11](../docs/protocol/11-skills.md) Â§12.
@@ -493,6 +531,10 @@ Part of [Status](../Status.md); what to build next in this area is in
 - Self-targeted spells, including Convocation and corpse offerings. Docs: [11](../docs/protocol/11-skills.md) Â§9a.
 - Winter Orb. Docs: [11](../docs/protocol/11-skills.md) Â§9a.
 - Dark Bargain (self-cast only; Summon Skeletons does not work yet). Docs: [11](../docs/protocol/11-skills.md) Â§9a.
+
+- Frozen Legion and Rallying spend stored uses per placed statue; each statue steps inward and attacks once with
+  Frozen Sweep.
+- Whirling Blades selects targets along its resolved slide and hits them in travel order.
 
 ## Not working yet
 

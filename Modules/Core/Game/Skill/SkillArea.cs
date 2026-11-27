@@ -23,9 +23,11 @@ public static class SkillArea
     static int? KnownBaseRadius(string? effect) =>
         Game.IsLightningWarpEffect(effect) ? 16
             : effect == "VaalGroundSlam" ? GroundSlamWave.VaalBaseRadius : IsCyclone(effect) ? 16 : effect == "RollingMagma" ? 14
-            : effect is "Earthquake" or "Earthshatter" ? 18
+            : effect is "Earthquake" or "Earthshatter" or "EarthshatterAltX" or "EarthshatterAltY" ? 18
+            : effect is "ConsecratedPath" or "ConsecratedPathAltX" ? 23
             : Game.LacerateEffect(effect) ? LacerateWaves.BaseRadius
             : Game.CleaveAttack(effect) ? Game.CleaveBaseRadius
+            : Game.IsBladestorm(effect) ? 24
             : effect is "TectonicSlam" or "VaalBladeVortex" ? 15
             : effect == "PrismaticBurst" ? 13
             : GatewayProjectileSkillProfiles.IsShatteringSteel(effect) ? 28
@@ -69,8 +71,10 @@ public static class SkillArea
         get(Stat.BaseSkillAreaOfEffectPlusPct) + get(Stat.SkillAreaOfEffectPlusPct) + (spell ? get(Stat.SpellAreaOfEffectPlusPct) : 0);
 
     /// <summary>The client's precomputed radius percentage (0x1591), not the increased area percentage.</summary>
-    public static int RadiusPercent(Func<uint, int> get, bool spell) =>
-        (int)Math.Clamp((long)Math.Floor(100 * Math.Sqrt(Modifier(get, spell)))
+    public static int RadiusPercent(Func<uint, int> get, bool spell) => RadiusPercent(get, spell, 1);
+
+    internal static int RadiusPercent(Func<uint, int> get, bool spell, double areaMore) =>
+        (int)Math.Clamp((long)Math.Floor(100 * Math.Sqrt(Modifier(get, spell) * areaMore))
             * Math.Max(0L, 100L + get(Stat.ActiveSkillAreaOfEffectRadiusPlusPctFinal)) / 100 - 100, -100, int.MaxValue);
 
     /// <summary>Supports' more or less area, each a "_final" multiplier on the supported skill: Spell Cascade, Arcanist
@@ -125,7 +129,8 @@ public static class SkillArea
     internal static int Radius(int baseRadius, Func<uint, int> get, bool spell, double areaMore)
     {
         int radius = baseRadius + get(Stat.ActiveSkillBaseRadiusPlus);
-        double scaled = radius * Math.Floor(100 * Math.Sqrt(Modifier(get, spell) * areaMore)) / 100;
+        double hundredths = 100 * Math.Sqrt(Modifier(get, spell) * areaMore);
+        double scaled = radius * Math.Floor(hundredths > 0 ? Math.BitIncrement(hundredths) : hundredths) / 100;
         scaled *= Math.Max(0, 1 + get(Stat.ActiveSkillAreaOfEffectRadiusPlusPctFinal) / 100.0);
         return Math.Max(0, (int)Math.Floor(scaled));
     }

@@ -235,7 +235,11 @@ public static partial class Game
             : WasItemisedCorpse(saved) ? PlaceItemisedCorpse(player, variety, (saved.X, saved.Y), saved.Level, saved.Mods)
             : SpawnPackMonster(saved.PackId, player, variety, saved.Level, saved.Rarity, saved.X, saved.Y,
                 friendly: !saved.Hostile, log: false, damagedLife: saved.Life, mods: saved.Mods,
-                unrisen: saved.Unrisen, placement: MonsterPlacement.Established, bulk: bulk);
+                unrisen: saved.Unrisen, placement: MonsterPlacement.Established, bulk: bulk,
+                scripted: saved.Scripted, ownedLooks: saved.Equipped,
+                owned: saved.NoRewards ? (_, m) => m.NoRewards = true : null,
+                shape: o => o with { StateMachine = saved.States ?? o.StateMachine, CurrentAction = saved.CurrentAction, MercenaryBuild = saved.ActorBuild },
+                ownedKit: saved.OwnedSkillEffects is { Length: > 0 } effects ? BossKits.KitFromEffects(player, variety, saved.Level, effects) : null);
 
     // An area's monsters are all placed at its first entry (14-monster-packs.md §2). One placed far from the player is
     // held back (InstanceWorld.HeldBackMonsters): it is the instance's, counted and saved with it, but it is not
@@ -523,6 +527,7 @@ public static partial class Game
             }
             mods = mods with { Effects = nextEffects, SpeciesApplied = true };
         }
+        if (!friendly) mods = MapInfluence.MonsterMods(variety, mods, MapModsOf(player));
         // A hostile unique keeps its auras up (a Rogue Exile's Hatred, Haste): their stats are its own from the spawn, and
         // a kept one keeps them in its mods.
         var auras = !friendly && rarity == MonsterRarity.Unique ? MonsterSkills.Auras(SkillsFor(player), variety, level) : default;
@@ -864,7 +869,8 @@ public static partial class Game
                 PresentationChanged = () => { foreach (var p in player.Frames.Players()) MonsterDebuffsChanged(p, id); },
                 Asleep = asleep,
                 Attack = skill is null && kit.Count == 0 ? null : kit.Count > 0 ? kit[0].Attack : attack,
-                Kit = kit, SkillIds = skillIds, Hostile = !friendly, Variety = variety, Level = level, Rarity = rarity, Movement = movement,
+                Kit = kit, OwnedSkillEffects = ownKit ? kit.Select(k => k.Effect).ToArray() : null,
+                SkillIds = skillIds, Hostile = !friendly, Variety = variety, Level = level, Rarity = rarity, Movement = movement,
                 Scripted = scripted || !friendly && atlas,
                 NonBlocking = nonBlocking || noBodyUntilReleased,
                 Life = initialLife, Stage = stageSkill is null ? null : stage, States = monster.StateMachine,
@@ -3124,6 +3130,12 @@ public static partial class Game
         var ailmentTaken = DamagePacket.Empty;
         int sourceTakenPct = ActorScale.Saturate((long)DamageTakenFromBlindedPct(player, id, stats)
             + DamageTakenFromMonster(m, stats) + NearbyAllyDamageTaken(player, here, now));
+        if (spellHit && StatOf(Stat.SpellDamageTakenPlusPctFromBlindedEnemies) is int blindedSpell and not 0
+            && Blinded(player, id, now))
+            sourceTakenPct = ActorScale.Saturate((long)sourceTakenPct + blindedSpell);
+        int opportunistic = StatOf(Stat.DamageTakenPlusPctIfThereAreAtLeast2RareOrUniqueEnemiesNearby);
+        double opportunisticFactor = opportunistic != 0 && !AtMostOneRareEnemy(player, now)
+            ? DamageFactor(opportunistic) : 1;
         bool hitRecently = player.RecentEvents.Happened(StatConditions.BeenHit, now);
         int pantheonElemTakenPct = hitRecently
             ? StatOf(Stat.ElementalDamageTakenPlusPctIfBeenHitRecently)
@@ -3149,7 +3161,7 @@ public static partial class Game
             int extraTakenPct = sourceTakenPct + (DamageTypes.IsElemental(type) ? pantheonElemTakenPct : 0);
             value = (int)Math.Round(value * player.ElementalAilments.DamageTakenFactor(now,
                     extraTakenPct + PlayerDamageTaken.IncreasedPct(type, melee: !a.Ranged && attackHit, StatOf, spell: spellHit, projectile: projectile))
-                * reservationFactor * ReservationTypedHitTakenFactor(player, type, now) * windDancer
+                * reservationFactor * ReservationTypedHitTakenFactor(player, type, now) * windDancer * opportunisticFactor
                 * (halfAreaDamage ? 0.5 : 1.0)
                 * (blocked ? PlayerDamageTaken.BlockedPct(type, StatOf) / 100.0 : 1));
             // Suppression prevents calculated damage. Armour must see the unsuppressed hit, and flat taken damage
@@ -3224,6 +3236,9 @@ public static partial class Game
         }
         RecordIncomingHitLocked(player, now, spellHit, blocked, suppressed, lifeDamage, damage > 0, monsterCritical,
             projectile: projectile, attack: attackHit, attacker: m);
+        if (suppressed && player.PlayerLife > 0 && StatOf(Stat.EnergyShieldRechargesOnSuppressPct) is int rechargeChance and > 0
+            && GameServer.Core.World.RandomRolls.Chance(rechargeChance, 100, player.IncomingHitRandom))
+            player.EnergyShield.StartRecharge(now, StatOf);
         RecentHitLifeLossOnHitLocked(player, now);
         UnhingedHitRecoveryLocked(player, now, stats);
         // Brine Bound: a hit that lands, blocked too (blocking keeps the defender's when-hit effects, wiki
